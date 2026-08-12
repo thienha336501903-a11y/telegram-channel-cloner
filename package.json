@@ -1,15 +1,16 @@
 {
   "name": "telegram-channel-cloner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Safe 1-to-N Telegram channel cloning with destination-specific internal-link rewriting.",
   "scripts": {
+    "build": "node scripts/verify-env.js",
     "test": "node --test tests/*.test.js",
-    "check": "node --check lib/*.js && node --check api/**/*.js",
+    "check": "node --check lib/*.js && node --check api/*.js && node --check api/auth/*.js && node --check api/cron/*.js && node --check api/reader/*.js && node --check api/telegram/*.js && node --check server/admin/*.js",
     "dev": "npx vercel dev"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   }
 }
