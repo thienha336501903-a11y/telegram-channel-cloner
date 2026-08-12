@@ -3,16 +3,17 @@ import { requireEnv } from '../../lib/env.js';
 import { normalizeBotChannelPost, linksForNormalizedMessage } from '../../lib/source-message.js';
 import { getActiveSource, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { insert } from '../../lib/supabase.js';
+import { TABLES } from '../../lib/tables.js';
 
 async function enqueue(source, normalized, { edited = false, hasInternalLinks = false } = {}) {
   const destinations = (await listDestinations({ activeOnly: true })).filter((d) => d.source_id === source.id || !d.source_id);
   for (const destination of destinations) {
-    const [job] = await insert('clone_jobs', { source_id: source.id, destination_id: destination.id, mode: 'live_mirror', status: 'queued' });
+    const [job] = await insert(TABLES.cloneJobs, { source_id: source.id, destination_id: destination.id, mode: 'live_mirror', status: 'queued' });
     if (!edited) {
-      await insert('clone_job_items', { job_id: job.id, source_message_id: normalized.source_message_id, source_message_ids: [normalized.source_message_id], phase: 'copy', status: 'queued' }, { returning: false });
+      await insert(TABLES.cloneJobItems, { job_id: job.id, source_message_id: normalized.source_message_id, source_message_ids: [normalized.source_message_id], phase: 'copy', status: 'queued' }, { returning: false });
     }
     if (edited || hasInternalLinks) {
-      await insert('clone_job_items', { job_id: job.id, source_message_id: normalized.source_message_id, source_message_ids: [normalized.source_message_id], phase: 'rewrite', status: 'queued' }, { returning: false });
+      await insert(TABLES.cloneJobItems, { job_id: job.id, source_message_id: normalized.source_message_id, source_message_ids: [normalized.source_message_id], phase: 'rewrite', status: 'queued' }, { returning: false });
     }
   }
 }
