@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Telegram Channel Cloner</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; } body { margin: 0; background: #f5f7fb; color: #182230; }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 28px 18px 70px; }
+    header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:24px; }
+    h1 { font-size: 24px; margin:0; } .sub { color:#667085; font-size:14px; margin-top:5px; }
+    .grid { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; }
+    .card { background:white; border:1px solid #e4e7ec; border-radius:14px; padding:16px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
+    .metric { font-size:28px; font-weight:700; margin-top:6px; } .label { color:#667085; font-size:13px; }
+    section { margin-top:18px; } table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { padding:11px 9px; text-align:left; border-bottom:1px solid #eaecf0; } th { color:#667085; font-weight:600; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; background:#f2f4f7; font-size:12px; }
+    .ok { background:#ecfdf3; color:#027a48; }.warn{background:#fffaeb;color:#b54708}.bad{background:#fef3f2;color:#b42318}
+    button { border:0; border-radius:9px; padding:9px 12px; cursor:pointer; font-weight:600; }
+    .primary { background:#1570ef; color:white; }.secondary{background:#eef2f6;color:#344054}
+    input { width:100%; border:1px solid #d0d5dd; border-radius:9px; padding:10px 11px; font:inherit; }
+    .row { display:flex; gap:9px; align-items:center; }.row input{flex:1} #login { max-width:380px; margin:13vh auto 0; } #app { display:none; }
+    .empty { color:#667085; padding:18px 0; } .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    @media(max-width:800px){ .grid{grid-template-columns:1fr 1fr} header{align-items:flex-start;flex-direction:column} }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login" class="card"><h1>Telegram Channel Cloner</h1><p class="sub">Đăng nhập trang quản trị.</p><form id="loginForm"><input id="password" type="password" placeholder="Mật khẩu quản trị" autocomplete="current-password" /><button class="primary" style="width:100%;margin-top:10px">Đăng nhập</button></form><p id="loginError" class="sub"></p></div>
+  <div id="app">
+    <header><div><h1>Telegram Channel Cloner</h1><div class="sub">MASTER → N kênh clone · link nội bộ theo từng kênh</div></div><div class="actions"><button id="refresh" class="secondary">Làm mới</button><button id="runTick" class="primary">Chạy 1 nhịp queue</button></div></header>
+    <div class="grid"><div class="card"><div class="label">Nguồn MASTER</div><div class="metric" id="mSources">–</div></div><div class="card"><div class="label">Kênh clone đang hoạt động</div><div class="metric" id="mDest">–</div></div><div class="card"><div class="label">Bài đã index</div><div class="metric" id="mMessages">–</div></div><div class="card"><div class="label">Bài có link nội bộ</div><div class="metric" id="mLinks">–</div></div></div>
+    <section class="card"><h3 style="margin-top:0">MASTER</h3><div id="sources"></div></section>
+    <section class="card"><h3 style="margin-top:0">Kênh clone</h3><form id="addDest" class="row"><input id="destChatId" placeholder="Chat ID hoặc @username của kênh đích" /><button class="primary">Thêm / kiểm tra</button></form><div id="destinations" style="margin-top:12px"></div></section>
+    <section class="card"><h3 style="margin-top:0">Jobs gần đây</h3><div id="jobs"></div></section>
+    <section class="card"><h3 style="margin-top:0">Cảnh báo</h3><div id="warnings"></div></section>
+  </div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+async function api(path, options={}){ const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}}); const j=await r.json().catch(()=>({})); if(r.status===401) throw Object.assign(new Error('unauthorized'),{unauthorized:true}); if(!r.ok) throw new Error(j.error||j.message||'API error'); return j; }
+function pill(status){ const c=status==='done'||status==='copied'?'ok':status==='failed'?'bad':'warn'; return `<span class="pill ${c}">${status||'—'}</span>`; }
+function table(headers, rows){ if(!rows.length)return '<div class="empty">Chưa có dữ liệu.</div>'; return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`; }
+async function load(){ try{ const d=await api('/api/admin/summary'); $('#login').style.display='none'; $('#app').style.display='block'; $('#mSources').textContent=d.counts.sources; $('#mDest').textContent=d.counts.active_destinations; $('#mMessages').textContent=d.counts.source_messages; $('#mLinks').textContent=d.counts.internal_link_messages; $('#sources').innerHTML=table(['Tên','Chat ID','Index','Trạng thái'],d.sources.map(s=>`<tr><td>${s.title||'—'}</td><td>${s.chat_id}</td><td>${s.indexed_message_count||0}</td><td>${s.active?pill('done'):pill('paused')}</td></tr>`)); $('#destinations').innerHTML=table(['Tên','Chat ID','Username','Trạng thái'],d.destinations.map(x=>`<tr><td>${x.title||'—'}</td><td>${x.chat_id}</td><td>${x.username?'@'+x.username:'private'}</td><td>${x.active?pill('done'):pill('paused')}</td></tr>`)); $('#jobs').innerHTML=table(['Tạo lúc','Mode','Trạng thái'],d.jobs.map(j=>`<tr><td>${new Date(j.created_at).toLocaleString('vi-VN')}</td><td>${j.mode}</td><td>${pill(j.status)}</td></tr>`)); $('#warnings').innerHTML=d.warnings.length?d.warnings.map(w=>`<div class="sub">${w.status}: ${w.last_error||''}</div>`).join(''):'<div class="empty">Không có cảnh báo.</div>'; }catch(e){ if(e.unauthorized){$('#login').style.display='block';$('#app').style.display='none';} else alert(e.message); } }
+$('#loginForm').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/auth/login',{method:'POST',body:JSON.stringify({password:$('#password').value})});$('#loginError').textContent='';await load();}catch(e){$('#loginError').textContent='Sai mật khẩu hoặc hệ thống chưa cấu hình.';}});
+$('#refresh').addEventListener('click',load); $('#runTick').addEventListener('click',async()=>{try{const d=await api('/api/admin/run-tick',{method:'POST'});alert(`Đã xử lý ${d.processed} item.`);await load();}catch(e){alert(e.message)}}); $('#addDest').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/admin/destinations',{method:'POST',body:JSON.stringify({chat_id:$('#destChatId').value.trim()})});$('#destChatId').value='';await load();}catch(e){alert(e.message)}}); load();
+</script>
+</body>
+</html>

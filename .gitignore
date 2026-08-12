@@ -1,0 +1,21 @@
+# Environment files / secrets
+.env*
+!.env.example
+
+# Vercel local metadata
+.vercel/
+
+# Dependencies
+node_modules/
+
+# Telegram / MTProto local session material
+*.session
+*.session-*
+*.session-journal
+reader-cli/*.session*
+reader-cli/.venv/
+
+# Python / OS noise
+__pycache__/
+*.pyc
+.DS_Store
