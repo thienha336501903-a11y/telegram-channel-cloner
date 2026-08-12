@@ -1,6 +1,7 @@
 import { isAuthenticated } from '../../lib/auth.js';
 import { json, method, readJson } from '../../lib/http.js';
 import { insert, select } from '../../lib/supabase.js';
+import { TABLES } from '../../lib/tables.js';
 
 function buildCopyItems(jobId, messages) {
   const items = [];
@@ -19,7 +20,7 @@ function buildCopyItems(jobId, messages) {
 }
 
 async function insertBatches(rows) {
-  for (let i = 0; i < rows.length; i += 250) await insert('clone_job_items', rows.slice(i, i + 250), { returning: false });
+  for (let i = 0; i < rows.length; i += 250) await insert(TABLES.cloneJobItems, rows.slice(i, i + 250), { returning: false });
 }
 
 export default async function handler(req, res) {
@@ -28,8 +29,8 @@ export default async function handler(req, res) {
   const body = await readJson(req);
   if (!body.source_id || !body.destination_id) return json(res, 400, { ok: false, error: 'source_id_and_destination_id_required' });
 
-  const messages = await select('source_messages', `select=source_message_id,media_group_id,has_internal_links,is_pinned&source_id=eq.${encodeURIComponent(body.source_id)}&order=source_message_id.asc`);
-  const [job] = await insert('clone_jobs', { source_id: body.source_id, destination_id: body.destination_id, mode: 'full_clone', status: 'queued' });
+  const messages = await select(TABLES.sourceMessages, `select=source_message_id,media_group_id,has_internal_links,is_pinned&source_id=eq.${encodeURIComponent(body.source_id)}&order=source_message_id.asc`);
+  const [job] = await insert(TABLES.cloneJobs, { source_id: body.source_id, destination_id: body.destination_id, mode: 'full_clone', status: 'queued' });
 
   const copyItems = buildCopyItems(job.id, messages);
   await insertBatches(copyItems);
