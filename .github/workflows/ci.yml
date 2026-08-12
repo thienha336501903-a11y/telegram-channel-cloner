@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Node tests
+        run: npm test
+      - name: JavaScript syntax
+        run: npm run check
+      - name: Python syntax
+        run: python -m py_compile reader-cli/export_history.py
+      - name: Secret hygiene
+        shell: bash
+        run: |
+          test ! -e .env
+          test ! -e .env.local
+          ! find . -type f -name '*.session*' -print -quit | grep -q .
+          ! grep -RInE '(sb_secret_[A-Za-z0-9_-]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,})' . \
+            --exclude-dir=.git --exclude='.env.example'
