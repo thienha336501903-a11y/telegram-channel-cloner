@@ -9,6 +9,14 @@ const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+class GatewayError extends Error {
+  constructor(code, status) {
+    super(code);
+    this.code = code;
+    this.status = status;
+  }
+}
+
 function clean(value) {
   return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
 }
@@ -58,6 +66,54 @@ function pickMedia(raw, messageType) {
   };
 }
 
+async function resolveTicketMedia(ticketToken) {
+  if (!UUID_RE.test(ticketToken)) throw new GatewayError('invalid_ticket', 400);
+
+  const ticket = await loadTicket(ticketToken);
+  if (!ticket || ticket.revoked_at) throw new GatewayError('ticket_invalid', 403);
+  if (!ticket.expires_at || Date.parse(ticket.expires_at) <= Date.now()) {
+    throw new GatewayError('ticket_expired', 403);
+  }
+
+  const rows = await select(
+    TABLES.sourceMessages,
+    `select=id,source_id,message_type,raw_message&id=eq.${encodeURIComponent(ticket.message_id)}&source_id=eq.${encodeURIComponent(ticket.source_id)}&limit=1`
+  );
+  const row = Array.isArray(rows) ? rows[0] || null : null;
+  if (!row) throw new GatewayError('media_not_found', 404);
+
+  const media = pickMedia(row.raw_message, row.message_type);
+  if (!media?.fileId) throw new GatewayError('media_file_id_missing', 409);
+  if (media.size > BOT_API_DOWNLOAD_LIMIT) throw new GatewayError('mtproto_required', 409);
+
+  const fileInfo = await telegram('getFile', { file_id: media.fileId });
+  if (!fileInfo?.file_path) throw new GatewayError('telegram_get_file_failed', 502);
+  return { ticket, media, fileInfo };
+}
+
+export async function probeMediaTicket(ticketToken) {
+  const { ticket, media, fileInfo } = await resolveTicketMedia(ticketToken);
+  const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
+  const upstream = await fetch(
+    `https://api.telegram.org/file/bot${botToken}/${fileInfo.file_path}`,
+    { headers: { Range: 'bytes=0-1023' } }
+  );
+  const result = {
+    ok: upstream.ok || upstream.status === 206,
+    ticketValidated: true,
+    course: ticket.course_slug,
+    messageId: ticket.message_id,
+    media: { name: media.name, size: media.size, mimeType: media.mimeType },
+    upstream: {
+      status: upstream.status,
+      contentLength: upstream.headers.get('content-length'),
+      contentRange: upstream.headers.get('content-range')
+    }
+  };
+  try { await upstream.body?.cancel(); } catch {}
+  return result;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -67,34 +123,14 @@ export default async function handler(req, res) {
 
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
-    if (!UUID_RE.test(ticketToken)) return json(res, 400, { ok: false, error: 'invalid_ticket' });
-
-    const ticket = await loadTicket(ticketToken);
-    if (!ticket || ticket.revoked_at) return json(res, 403, { ok: false, error: 'ticket_invalid' });
-    if (!ticket.expires_at || Date.parse(ticket.expires_at) <= Date.now()) {
-      return json(res, 403, { ok: false, error: 'ticket_expired' });
+    if (process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1') {
+      return json(res, 200, await probeMediaTicket(ticketToken));
     }
 
-    const rows = await select(
-      TABLES.sourceMessages,
-      `select=id,source_id,message_type,raw_message&id=eq.${encodeURIComponent(ticket.message_id)}&source_id=eq.${encodeURIComponent(ticket.source_id)}&limit=1`
-    );
-    const row = Array.isArray(rows) ? rows[0] || null : null;
-    if (!row) return json(res, 404, { ok: false, error: 'media_not_found' });
-
-    const media = pickMedia(row.raw_message, row.message_type);
-    if (!media?.fileId) return json(res, 409, { ok: false, error: 'media_file_id_missing' });
-    if (media.size > BOT_API_DOWNLOAD_LIMIT) {
-      return json(res, 409, { ok: false, error: 'mtproto_required' });
-    }
-
-    const fileInfo = await telegram('getFile', { file_id: media.fileId });
-    if (!fileInfo?.file_path) return json(res, 502, { ok: false, error: 'telegram_get_file_failed' });
-
+    const { media, fileInfo } = await resolveTicketMedia(ticketToken);
     const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
-    const previewProbe = process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1';
     const upstreamHeaders = {};
-    const range = previewProbe ? 'bytes=0-1023' : String(req.headers.range || '').trim();
+    const range = String(req.headers.range || '').trim();
     if (range) upstreamHeaders.Range = range;
 
     const upstream = await fetch(
@@ -103,23 +139,6 @@ export default async function handler(req, res) {
     );
     if ((!upstream.ok && upstream.status !== 206) || !upstream.body) {
       return json(res, 502, { ok: false, error: 'telegram_file_fetch_failed' });
-    }
-
-    if (previewProbe) {
-      const result = {
-        ok: true,
-        ticketValidated: true,
-        course: ticket.course_slug,
-        messageId: ticket.message_id,
-        media: { name: media.name, size: media.size, mimeType: media.mimeType },
-        upstream: {
-          status: upstream.status,
-          contentLength: upstream.headers.get('content-length'),
-          contentRange: upstream.headers.get('content-range')
-        }
-      };
-      try { await upstream.body.cancel(); } catch {}
-      return json(res, 200, result);
     }
 
     res.statusCode = upstream.status;
@@ -135,8 +154,10 @@ export default async function handler(req, res) {
     if (req.method === 'HEAD') return res.end();
     Readable.fromWeb(upstream.body).pipe(res);
   } catch (error) {
-    console.error('[telegram-media-gateway]', error);
-    if (!res.headersSent) return json(res, 500, { ok: false, error: 'media_gateway_failed' });
+    const code = error?.code || 'media_gateway_failed';
+    const status = Number(error?.status || 500);
+    console.error('[telegram-media-gateway]', code, error?.message || error);
+    if (!res.headersSent) return json(res, status, { ok: false, error: code });
     res.end();
   }
 }
