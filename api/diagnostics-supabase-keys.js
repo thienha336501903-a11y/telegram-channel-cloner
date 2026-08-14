@@ -4,6 +4,7 @@ import { TABLES } from '../lib/tables.js';
 
 const BOT_LIMIT = 20 * 1024 * 1024;
 const CAGIATAY_SOURCE_ID = 'de2e9a07-631b-4e93-8140-24c3b8893ec3';
+const CAGIATAY_CHAT_ID = '-1004486574754';
 
 function clean(value) {
   return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
@@ -69,6 +70,11 @@ function videoMeta(row) {
 async function telegramMediaProbe() {
   const token = clean(process.env.TELEGRAM_BOT_TOKEN);
   if (!token) return { ok: false, error: 'bot_token_missing' };
+
+  const chatResponse = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(CAGIATAY_CHAT_ID)}`);
+  const chatInfo = await chatResponse.json().catch(() => null);
+  const protectedContent = Boolean(chatInfo?.ok && chatInfo?.result?.has_protected_content);
+
   const rows = await select(TABLES.sourceMessages, `select=source_message_id,message_type,raw_message&source_id=eq.${encodeURIComponent(CAGIATAY_SOURCE_ID)}&message_type=eq.video&order=source_message_id.asc`);
   const videos = (rows || []).map(videoMeta).filter(Boolean);
   const small = videos.find((v) => v.size < 10 * 1024 * 1024) || videos[0] || null;
@@ -102,7 +108,16 @@ async function telegramMediaProbe() {
     samples.push(sample);
   }
 
-  return { ok: true, totalVideos: videos.length, samples };
+  return {
+    ok: true,
+    channel: {
+      getChatStatus: chatResponse.status,
+      getChatOk: Boolean(chatInfo?.ok),
+      protectedContent
+    },
+    totalVideos: videos.length,
+    samples
+  };
 }
 
 export default async function handler(req, res) {
