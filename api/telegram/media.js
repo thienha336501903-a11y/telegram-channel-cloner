@@ -88,30 +88,7 @@ async function resolveTicketMedia(ticketToken) {
 
   const fileInfo = await telegram('getFile', { file_id: media.fileId });
   if (!fileInfo?.file_path) throw new GatewayError('telegram_get_file_failed', 502);
-  return { ticket, media, fileInfo };
-}
-
-export async function probeMediaTicket(ticketToken) {
-  const { ticket, media, fileInfo } = await resolveTicketMedia(ticketToken);
-  const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
-  const upstream = await fetch(
-    `https://api.telegram.org/file/bot${botToken}/${fileInfo.file_path}`,
-    { headers: { Range: 'bytes=0-1023' } }
-  );
-  const result = {
-    ok: upstream.ok || upstream.status === 206,
-    ticketValidated: true,
-    course: ticket.course_slug,
-    messageId: ticket.message_id,
-    media: { name: media.name, size: media.size, mimeType: media.mimeType },
-    upstream: {
-      status: upstream.status,
-      contentLength: upstream.headers.get('content-length'),
-      contentRange: upstream.headers.get('content-range')
-    }
-  };
-  try { await upstream.body?.cancel(); } catch {}
-  return result;
+  return { media, fileInfo };
 }
 
 export default async function handler(req, res) {
@@ -123,10 +100,6 @@ export default async function handler(req, res) {
 
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
-    if (process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1') {
-      return json(res, 200, await probeMediaTicket(ticketToken));
-    }
-
     const { media, fileInfo } = await resolveTicketMedia(ticketToken);
     const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
     const upstreamHeaders = {};
