@@ -38,9 +38,9 @@ async function runMtprotoProbe() {
       import('teleproto/sessions/index.js')
     ]);
     client = new TelegramClient(new StringSession(''), apiId, apiHash, {
-      connectionRetries: 2,
-      requestRetries: 1,
-      autoReconnect: false,
+      connectionRetries: 5,
+      requestRetries: 5,
+      autoReconnect: true,
       sequentialUpdates: true
     });
 
