@@ -35,7 +35,7 @@ async function runMtprotoProbe() {
   try {
     const [{ TelegramClient }, { StringSession }] = await Promise.all([
       import('teleproto'),
-      import('teleproto/sessions')
+      import('teleproto/sessions/index.js')
     ]);
     client = new TelegramClient(new StringSession(''), apiId, apiHash, {
       connectionRetries: 2,
