@@ -54,6 +54,11 @@ export default async function handler(req, res) {
   if (process.env.VERCEL_ENV !== 'preview') return json(res, 404, { ok: false, error: 'not_found' });
   if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method_not_allowed' });
 
+  if (String(req.query?.run || '') === 'cagiatay') {
+    const module = await import('./telegram/cagiatay-backfill-once.js');
+    return module.default(req, res);
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const results = await Promise.all([
     probe('SUPABASE_SECRET_KEY', process.env.SUPABASE_SECRET_KEY),
