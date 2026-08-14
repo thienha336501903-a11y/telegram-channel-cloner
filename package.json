@@ -12,5 +12,8 @@
   },
   "engines": {
     "node": "24.x"
+  },
+  "dependencies": {
+    "teleproto": "1.228.4"
   }
 }
