@@ -190,12 +190,9 @@ async function streamViaMtproto(req, res, row, media) {
   }
 
   const size = resolved.size;
-  const probeRange = process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1'
-    ? 'bytes=1048576-1050623'
-    : req.headers.range;
   let range;
   try {
-    range = parseRange(probeRange, size);
+    range = parseRange(req.headers.range, size);
   } catch (error) {
     if (error?.status === 416) res.setHeader('Content-Range', `bytes */${size}`);
     throw error;
@@ -238,7 +235,7 @@ export default async function handler(req, res) {
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
     const { row, media } = await resolveTicketMedia(ticketToken);
-    if (media.size > BOT_API_DOWNLOAD_LIMIT) {
+    if (media.size > BOT_API_DOWNLOAD_LIMIT || !media.fileId) {
       await streamViaMtproto(req, res, row, media);
       return;
     }
