@@ -3,9 +3,102 @@ import { select } from '../lib/supabase.js';
 import { TABLES } from '../lib/tables.js';
 import { getMe, telegram } from '../lib/telegram.js';
 
+const CAGIATAY_CHAT_ID = '-1004486574754';
+const CAGIATAY_TEST_MESSAGE_ID = 4;
+
+function safeError(error) {
+  return {
+    name: String(error?.name || 'Error'),
+    message: String(error?.errorMessage || error?.message || 'unknown_error').slice(0, 240),
+    code: error?.code ?? error?.errorCode ?? null
+  };
+}
+
+async function runMtprotoProbe() {
+  const apiId = Number.parseInt(String(process.env.TELEGRAM_API_ID || ''), 10);
+  const apiHash = String(process.env.TELEGRAM_API_HASH || '').trim();
+  const botToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const result = {
+    env: {
+      apiId: Number.isInteger(apiId) && apiId > 0,
+      apiHash: Boolean(apiHash),
+      botToken: Boolean(botToken)
+    },
+    auth: { ok: false },
+    entity: { ok: false },
+    message: { ok: false }
+  };
+
+  if (!result.env.apiId || !result.env.apiHash || !result.env.botToken) return result;
+
+  let client = null;
+  try {
+    const [{ TelegramClient }, { StringSession }] = await Promise.all([
+      import('teleproto'),
+      import('teleproto/sessions')
+    ]);
+    client = new TelegramClient(new StringSession(''), apiId, apiHash, {
+      connectionRetries: 2,
+      requestRetries: 1,
+      autoReconnect: false,
+      sequentialUpdates: true
+    });
+
+    await client.start({ botAuthToken: botToken });
+    const me = await client.getMe();
+    result.auth = {
+      ok: true,
+      bot: Boolean(me?.bot),
+      id: me?.id != null ? String(me.id) : null,
+      username: me?.username || null
+    };
+
+    try {
+      const entity = await client.getInputEntity(CAGIATAY_CHAT_ID);
+      result.entity = {
+        ok: true,
+        className: entity?.className || entity?.constructor?.name || null,
+        channelId: entity?.channelId != null ? String(entity.channelId) : null,
+        hasAccessHash: entity?.accessHash != null
+      };
+
+      try {
+        const messages = await client.getMessages(entity, { ids: CAGIATAY_TEST_MESSAGE_ID });
+        const message = Array.isArray(messages) ? messages[0] : null;
+        const document = message?.media?.document || null;
+        result.message = {
+          ok: Boolean(message),
+          id: message?.id ?? null,
+          className: message?.className || message?.constructor?.name || null,
+          hasMedia: Boolean(message?.media),
+          hasDocument: Boolean(document),
+          documentSize: document?.size != null ? Number(document.size) : null,
+          documentId: document?.id != null ? String(document.id) : null,
+          hasDocumentAccessHash: document?.accessHash != null,
+          hasFileReference: Boolean(document?.fileReference?.length)
+        };
+      } catch (error) {
+        result.message = { ok: false, error: safeError(error) };
+      }
+    } catch (error) {
+      result.entity = { ok: false, error: safeError(error) };
+    }
+  } catch (error) {
+    result.auth = { ok: false, error: safeError(error) };
+  } finally {
+    try { await client?.disconnect(); } catch {}
+  }
+
+  return result;
+}
+
 export default async function handler(req, res) {
   if (process.env.VERCEL_ENV !== 'preview') {
     return json(res, 404, { ok: false, error: 'not_found' });
+  }
+
+  if (String(req.query?.mtproto || '') === '1') {
+    return json(res, 200, { ok: true, mtproto: await runMtprotoProbe() });
   }
 
   const checks = {
