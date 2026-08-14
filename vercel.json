@@ -5,10 +5,10 @@
       "maxDuration": 60
     }
   },
-  "crons": [
+  "rewrites": [
     {
-      "path": "/api/cron/tick",
-      "schedule": "* * * * *"
+      "source": "/api/admin/:action",
+      "destination": "/api/admin?action=:action"
     }
   ],
   "headers": [
