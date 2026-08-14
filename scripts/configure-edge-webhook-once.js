@@ -22,9 +22,23 @@ await telegram('setWebhook', {
   drop_pending_updates: false
 });
 
+let deletedTestPost = false;
+try {
+  await telegram('deleteMessage', {
+    chat_id: '-1004486574754',
+    message_id: 31
+  });
+  deletedTestPost = true;
+} catch (error) {
+  const message = String(error?.message || error || '');
+  if (!/message to delete not found|message can't be deleted/i.test(message)) throw error;
+}
+
+await new Promise(resolve => setTimeout(resolve, 1200));
 const info = await telegram('getWebhookInfo');
-console.log('[edge-webhook-config]', JSON.stringify({
+console.log('[edge-webhook-cleanup]', JSON.stringify({
   ok: true,
+  deletedTestPost,
   url: info?.url || null,
   pendingUpdateCount: Number(info?.pending_update_count || 0),
   lastErrorMessage: info?.last_error_message || null,
