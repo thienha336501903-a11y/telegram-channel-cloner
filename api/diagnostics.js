@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
+import { PassThrough } from 'node:stream';
 import { json } from '../lib/http.js';
 import { select } from '../lib/supabase.js';
 import { TABLES } from '../lib/tables.js';
 import { getMe, telegram } from '../lib/telegram.js';
+import mediaHandler from './telegram/media.js';
 
 const CAGIATAY_CHAT_ID = '-1004486574754';
 const CAGIATAY_TEST_MESSAGE_ID = 4;
@@ -11,6 +14,40 @@ function safeError(error) {
     name: String(error?.name || 'Error'),
     message: String(error?.errorMessage || error?.message || 'unknown_error').slice(0, 240),
     code: error?.code ?? error?.errorCode ?? null
+  };
+}
+
+async function runGatewayProbe(ticket) {
+  const chunks = [];
+  const headers = new Map();
+  const mockRes = new PassThrough();
+  mockRes.statusCode = 200;
+  mockRes.headersSent = false;
+  mockRes.setHeader = (name, value) => headers.set(String(name).toLowerCase(), String(value));
+  mockRes.getHeader = (name) => headers.get(String(name).toLowerCase());
+  mockRes.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+
+  const mockReq = {
+    method: 'GET',
+    query: { ticket: String(ticket || '') },
+    headers: { range: 'bytes=1048576-1050623' }
+  };
+
+  const startedAt = Date.now();
+  await mediaHandler(mockReq, mockRes);
+  if (!mockRes.writableEnded) {
+    await new Promise((resolve) => mockRes.once('finish', resolve));
+  }
+  const body = Buffer.concat(chunks);
+  return {
+    status: mockRes.statusCode,
+    contentLengthHeader: headers.get('content-length') || null,
+    contentRange: headers.get('content-range') || null,
+    acceptRanges: headers.get('accept-ranges') || null,
+    contentType: headers.get('content-type') || null,
+    bodyBytes: body.length,
+    bodySha256: createHash('sha256').update(body).digest('hex'),
+    elapsedMs: Date.now() - startedAt
   };
 }
 
@@ -116,6 +153,15 @@ async function runMtprotoProbe({ download = false } = {}) {
 export default async function handler(req, res) {
   if (process.env.VERCEL_ENV !== 'preview') {
     return json(res, 404, { ok: false, error: 'not_found' });
+  }
+
+  const gatewayTicket = String(req.query?.gateway_ticket || '').trim();
+  if (gatewayTicket) {
+    try {
+      return json(res, 200, { ok: true, gateway: await runGatewayProbe(gatewayTicket) });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: safeError(error) });
+    }
   }
 
   const mtprotoMode = String(req.query?.mtproto || '');
