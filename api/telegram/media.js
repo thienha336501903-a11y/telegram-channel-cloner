@@ -190,9 +190,12 @@ async function streamViaMtproto(req, res, row, media) {
   }
 
   const size = resolved.size;
+  const probeRange = process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1'
+    ? 'bytes=1048576-1050623'
+    : req.headers.range;
   let range;
   try {
-    range = parseRange(req.headers.range, size);
+    range = parseRange(probeRange, size);
   } catch (error) {
     if (error?.status === 416) res.setHeader('Content-Range', `bytes */${size}`);
     throw error;
