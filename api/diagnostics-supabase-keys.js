@@ -1,4 +1,9 @@
 import { json } from '../lib/http.js';
+import { select } from '../lib/supabase.js';
+import { TABLES } from '../lib/tables.js';
+
+const BOT_LIMIT = 20 * 1024 * 1024;
+const CAGIATAY_SOURCE_ID = 'de2e9a07-631b-4e93-8140-24c3b8893ec3';
 
 function clean(value) {
   return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
@@ -50,14 +55,66 @@ async function probe(name, value) {
   }
 }
 
+function videoMeta(row) {
+  const item = row?.raw_message?.video;
+  if (!item) return null;
+  return {
+    messageId: Number(row.source_message_id),
+    fileId: String(item.file_id || ''),
+    size: Number(item.file_size || 0),
+    name: String(item.file_name || '')
+  };
+}
+
+async function telegramMediaProbe() {
+  const token = clean(process.env.TELEGRAM_BOT_TOKEN);
+  if (!token) return { ok: false, error: 'bot_token_missing' };
+  const rows = await select(TABLES.sourceMessages, `select=source_message_id,message_type,raw_message&source_id=eq.${encodeURIComponent(CAGIATAY_SOURCE_ID)}&message_type=eq.video&order=source_message_id.asc`);
+  const videos = (rows || []).map(videoMeta).filter(Boolean);
+  const small = videos.find((v) => v.size < 10 * 1024 * 1024) || videos[0] || null;
+  const near = videos.find((v) => v.size > 18 * 1024 * 1024 && v.size <= BOT_LIMIT) || null;
+  const large = videos.find((v) => v.size > BOT_LIMIT) || null;
+  const samples = [];
+
+  for (const video of [small, near, large].filter(Boolean)) {
+    const infoResponse = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(video.fileId)}`);
+    const info = await infoResponse.json().catch(() => null);
+    const sample = {
+      messageId: video.messageId,
+      name: video.name,
+      size: video.size,
+      withinBotLimit: video.size <= BOT_LIMIT,
+      getFileStatus: infoResponse.status,
+      getFileOk: Boolean(info?.ok),
+      description: info?.description || null,
+      range: null
+    };
+    if (infoResponse.ok && info?.ok && info?.result?.file_path) {
+      const fileResponse = await fetch(`https://api.telegram.org/file/bot${token}/${info.result.file_path}`, { headers: { Range: 'bytes=0-1023' } });
+      sample.range = {
+        status: fileResponse.status,
+        contentLength: fileResponse.headers.get('content-length'),
+        contentRange: fileResponse.headers.get('content-range'),
+        acceptRanges: fileResponse.headers.get('accept-ranges')
+      };
+      try { await fileResponse.body?.cancel(); } catch {}
+    }
+    samples.push(sample);
+  }
+
+  return { ok: true, totalVideos: videos.length, samples };
+}
+
 export default async function handler(req, res) {
   if (process.env.VERCEL_ENV !== 'preview') return json(res, 404, { ok: false, error: 'not_found' });
   if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method_not_allowed' });
 
-  if (String(req.query?.run || '') === 'cagiatay') {
+  const run = String(req.query?.run || '');
+  if (run === 'cagiatay') {
     const module = await import('./telegram/cagiatay-backfill-once.js');
     return module.default(req, res);
   }
+  if (run === 'media') return json(res, 200, await telegramMediaProbe());
 
   const now = Math.floor(Date.now() / 1000);
   const results = await Promise.all([
