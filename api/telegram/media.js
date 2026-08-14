@@ -92,8 +92,9 @@ export default async function handler(req, res) {
     if (!fileInfo?.file_path) return json(res, 502, { ok: false, error: 'telegram_get_file_failed' });
 
     const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
+    const previewProbe = process.env.VERCEL_ENV === 'preview' && String(req.query?.probe || '') === '1';
     const upstreamHeaders = {};
-    const range = String(req.headers.range || '').trim();
+    const range = previewProbe ? 'bytes=0-1023' : String(req.headers.range || '').trim();
     if (range) upstreamHeaders.Range = range;
 
     const upstream = await fetch(
@@ -102,6 +103,23 @@ export default async function handler(req, res) {
     );
     if ((!upstream.ok && upstream.status !== 206) || !upstream.body) {
       return json(res, 502, { ok: false, error: 'telegram_file_fetch_failed' });
+    }
+
+    if (previewProbe) {
+      const result = {
+        ok: true,
+        ticketValidated: true,
+        course: ticket.course_slug,
+        messageId: ticket.message_id,
+        media: { name: media.name, size: media.size, mimeType: media.mimeType },
+        upstream: {
+          status: upstream.status,
+          contentLength: upstream.headers.get('content-length'),
+          contentRange: upstream.headers.get('content-range')
+        }
+      };
+      try { await upstream.body.cancel(); } catch {}
+      return json(res, 200, result);
     }
 
     res.statusCode = upstream.status;
