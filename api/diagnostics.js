@@ -14,7 +14,7 @@ function safeError(error) {
   };
 }
 
-async function runMtprotoProbe() {
+async function runMtprotoProbe({ download = false } = {}) {
   const apiId = Number.parseInt(String(process.env.TELEGRAM_API_ID || ''), 10);
   const apiHash = String(process.env.TELEGRAM_API_HASH || '').trim();
   const botToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -26,7 +26,8 @@ async function runMtprotoProbe() {
     },
     auth: { ok: false },
     entity: { ok: false },
-    message: { ok: false }
+    message: { ok: false },
+    download: download ? { ok: false } : undefined
   };
 
   if (!result.env.apiId || !result.env.apiHash || !result.env.botToken) return result;
@@ -77,6 +78,26 @@ async function runMtprotoProbe() {
           hasDocumentAccessHash: document?.accessHash != null,
           hasFileReference: Boolean(document?.fileReference?.length)
         };
+
+        if (download && message && document) {
+          const startedAt = Date.now();
+          try {
+            const buffer = await client.downloadMedia(message);
+            const byteLength = Buffer.isBuffer(buffer) ? buffer.length : 0;
+            result.download = {
+              ok: byteLength > 0 && byteLength === Number(document.size),
+              byteLength,
+              expectedBytes: Number(document.size),
+              elapsedMs: Date.now() - startedAt
+            };
+          } catch (error) {
+            result.download = {
+              ok: false,
+              elapsedMs: Date.now() - startedAt,
+              error: safeError(error)
+            };
+          }
+        }
       } catch (error) {
         result.message = { ok: false, error: safeError(error) };
       }
@@ -97,8 +118,12 @@ export default async function handler(req, res) {
     return json(res, 404, { ok: false, error: 'not_found' });
   }
 
-  if (String(req.query?.mtproto || '') === '1') {
-    return json(res, 200, { ok: true, mtproto: await runMtprotoProbe() });
+  const mtprotoMode = String(req.query?.mtproto || '');
+  if (mtprotoMode === '1' || mtprotoMode === 'download') {
+    return json(res, 200, {
+      ok: true,
+      mtproto: await runMtprotoProbe({ download: mtprotoMode === 'download' })
+    });
   }
 
   const checks = {
