@@ -1,7 +1,7 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { normalizeBotChannelPost, linksForNormalizedMessage } from '../../lib/source-message.js';
-import { getActiveSource, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
+import { getActiveSourceByChatId, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { insert } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
@@ -26,8 +26,8 @@ export default async function handler(req, res) {
   const message = update.channel_post || update.edited_channel_post;
   if (!message) return json(res, 200, { ok: true, ignored: true });
 
-  const source = await getActiveSource();
-  if (!source || String(message.chat?.id) !== String(source.chat_id)) return json(res, 200, { ok: true, ignored: true });
+  const source = await getActiveSourceByChatId(message.chat?.id);
+  if (!source) return json(res, 200, { ok: true, ignored: true });
 
   const normalized = normalizeBotChannelPost(message);
   const links = linksForNormalizedMessage(normalized, source);
