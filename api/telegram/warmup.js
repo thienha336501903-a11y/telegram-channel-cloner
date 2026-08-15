@@ -1,7 +1,16 @@
+import { once } from 'node:events';
 import { json } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
-import { getMtprotoClient } from '../../lib/mtproto-media.js';
+import { select } from '../../lib/supabase.js';
+import { TABLES } from '../../lib/tables.js';
+import {
+  getMtprotoClient,
+  resolveMtprotoDocument,
+  resetMtprotoClient,
+  streamResolvedMtprotoRange
+} from '../../lib/mtproto-media.js';
 
+const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -17,11 +26,17 @@ function supabaseHeaders() {
   return headers;
 }
 
-async function requireActiveTicket(token) {
+function appendServerTiming(res, name, durationMs) {
+  const metric = `${name};dur=${Math.max(0, Math.round(durationMs))}`;
+  const current = String(res.getHeader('Server-Timing') || '').trim();
+  res.setHeader('Server-Timing', current ? `${current}, ${metric}` : metric);
+}
+
+async function loadActiveTicket(token) {
   if (!UUID_RE.test(token)) return { ok: false, status: 400, error: 'invalid_ticket' };
   const base = clean(requireEnv('SUPABASE_URL')).replace(/\/$/, '');
   const qs = new URLSearchParams({
-    select: 'token,expires_at,revoked_at',
+    select: 'token,source_id,message_id,expires_at,revoked_at',
     token: `eq.${token}`,
     limit: '1'
   });
@@ -35,7 +50,120 @@ async function requireActiveTicket(token) {
   if (!ticket.expires_at || Date.parse(ticket.expires_at) <= Date.now()) {
     return { ok: false, status: 403, error: 'ticket_expired' };
   }
-  return { ok: true };
+  return { ok: true, ticket };
+}
+
+function pickMedia(raw, messageType) {
+  const value = raw && typeof raw === 'object' ? raw : {};
+  const key = messageType === 'video_note' ? 'video_note' : messageType;
+  const item = value[key] && typeof value[key] === 'object' ? value[key] : null;
+  if (!item) return null;
+  return {
+    fileId: String(item.file_id || ''),
+    size: Number(item.file_size || 0),
+    mimeType: String(item.mime_type || 'application/octet-stream'),
+    name: String(item.file_name || `telegram-${messageType}`)
+  };
+}
+
+async function resolveTicketMedia(ticket) {
+  const rows = await select(
+    TABLES.sourceMessages,
+    `select=id,source_id,source_message_id,message_type,raw_message&id=eq.${encodeURIComponent(ticket.message_id)}&source_id=eq.${encodeURIComponent(ticket.source_id)}&limit=1`
+  );
+  const row = Array.isArray(rows) ? rows[0] || null : null;
+  if (!row) return { ok: false, status: 404, error: 'media_not_found' };
+  const media = pickMedia(row.raw_message, row.message_type);
+  if (!media) return { ok: false, status: 409, error: 'media_metadata_missing' };
+  if (media.fileId && media.size <= BOT_API_DOWNLOAD_LIMIT) {
+    return { ok: false, status: 409, error: 'mtproto_not_required' };
+  }
+  return { ok: true, row, media };
+}
+
+function parseRange(rangeHeader, size) {
+  const raw = String(rangeHeader || '').trim();
+  if (!raw) return { partial: false, start: 0, end: size - 1 };
+  if (!raw.startsWith('bytes=') || raw.includes(',')) return null;
+  const match = /^(\d*)-(\d*)$/.exec(raw.slice(6).trim());
+  if (!match || (!match[1] && !match[2])) return null;
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffix = Number.parseInt(match[2], 10);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number.parseInt(match[1], 10);
+    if (!Number.isSafeInteger(start) || start < 0 || start >= size) return null;
+    end = match[2] ? Number.parseInt(match[2], 10) : size - 1;
+    if (!Number.isSafeInteger(end) || end < start) return null;
+    end = Math.min(end, size - 1);
+  }
+  return { partial: true, start, end };
+}
+
+async function streamMtproto(req, res, row, media) {
+  const sourceRows = await select(
+    TABLES.sources,
+    `select=id,chat_id&id=eq.${encodeURIComponent(row.source_id)}&limit=1`
+  );
+  const source = Array.isArray(sourceRows) ? sourceRows[0] || null : null;
+  if (!source?.chat_id) return { ok: false, status: 404, error: 'telegram_source_missing' };
+
+  const resolveStartedAt = Date.now();
+  let resolved;
+  try {
+    resolved = await resolveMtprotoDocument({
+      chatId: source.chat_id,
+      messageId: row.source_message_id
+    });
+  } catch (error) {
+    resetMtprotoClient();
+    throw error;
+  }
+  appendServerTiming(res, 'mtproto-resolve', Date.now() - resolveStartedAt);
+
+  const range = parseRange(req.headers.range, resolved.size);
+  if (!range) {
+    res.setHeader('Content-Range', `bytes */${resolved.size}`);
+    return { ok: false, status: 416, error: 'range_not_satisfiable' };
+  }
+
+  res.statusCode = range.partial ? 206 : 200;
+  res.setHeader('Content-Type', media.mimeType);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Length', String(range.end - range.start + 1));
+  if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${resolved.size}`);
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
+  if (req.method === 'HEAD') return { ok: true };
+
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) abortController.abort();
+  };
+  res.once('close', onClose);
+  try {
+    await streamResolvedMtprotoRange({
+      resolved,
+      start: range.start,
+      end: range.end,
+      signal: abortController.signal,
+      onChunk: async (chunk) => {
+        if (!res.write(chunk)) await once(res, 'drain');
+      }
+    });
+    res.end();
+    return { ok: true };
+  } catch (error) {
+    if (error?.code !== 'request_aborted') resetMtprotoClient();
+    throw error;
+  } finally {
+    res.off('close', onClose);
+  }
 }
 
 export default async function handler(req, res) {
@@ -46,17 +174,28 @@ export default async function handler(req, res) {
   }
 
   try {
-    const ticket = String(req.query?.ticket || '').trim();
-    const access = await requireActiveTicket(ticket);
+    const ticketToken = String(req.query?.ticket || '').trim();
+    const access = await loadActiveTicket(ticketToken);
     if (!access.ok) return json(res, access.status, { ok: false, error: access.error });
 
     const startedAt = Date.now();
-    await getMtprotoClient();
-    res.setHeader('Server-Timing', `mtproto-warmup;dur=${Date.now() - startedAt}`);
-    res.statusCode = 204;
-    return res.end();
+    if (String(req.query?.stream || '') !== '1') {
+      await getMtprotoClient();
+      res.setHeader('Server-Timing', `mtproto-warmup;dur=${Date.now() - startedAt}`);
+      res.statusCode = 204;
+      return res.end();
+    }
+
+    const resolved = await resolveTicketMedia(access.ticket);
+    if (!resolved.ok) return json(res, resolved.status, { ok: false, error: resolved.error });
+    appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
+    const streamed = await streamMtproto(req, res, resolved.row, resolved.media);
+    if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
+    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - startedAt}`);
+    if (!res.writableEnded) res.end();
   } catch (error) {
     console.error('[telegram-mtproto-warmup]', error?.message || error);
-    return json(res, 500, { ok: false, error: 'mtproto_warmup_failed' });
+    if (!res.headersSent) return json(res, 500, { ok: false, error: 'mtproto_warmup_failed' });
+    if (!res.writableEnded) res.end();
   }
 }
