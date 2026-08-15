@@ -27,7 +27,7 @@ jobs:
       - name: Verify Bot and MTProto Preview startup
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          LMS_ORIGIN: https://yeunauan-lms-git-5b4b00-thienha100022653824678-stacks-projects.vercel.app
+          LMS_ORIGIN: https://yeunauan-lms-clone.vercel.app
           CLONER_ORIGIN: https://telegram-chan-git-f8c885-thienha100022653824678-stacks-projects.vercel.app
         run: |
           set -euo pipefail
