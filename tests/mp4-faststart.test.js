@@ -161,11 +161,12 @@ test('reuses a serialized fast-start index across function instances', async () 
   assert.deepEqual(second.moov, first.moov);
 });
 
-test('ticketed HEAD warm-up prepares MP4 metadata without streaming a body', () => {
+test('ticketed prepare mode builds MP4 metadata and returns 204 without a body', () => {
   const bot = readFileSync(new URL('../api/telegram/media.js', import.meta.url), 'utf8');
   const mtproto = readFileSync(new URL('../api/telegram/warmup.js', import.meta.url), 'utf8');
   for (const handler of [bot, mtproto]) {
-    assert.match(handler, /req\.method !== 'HEAD' \|\| String\(req\.query\?\.prepare \|\| ''\) === '1'/);
-    assert.match(handler, /if \(req\.method === 'HEAD'\)/);
+    assert.match(handler, /const prepareOnly = String\(req\.query\?\.prepare \|\| ''\) === '1'/);
+    assert.match(handler, /if \(prepareOnly\) \{/);
+    assert.match(handler, /res\.statusCode = 204/);
   }
 });

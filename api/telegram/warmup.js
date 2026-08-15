@@ -132,12 +132,13 @@ async function streamMtproto(req, res, row, media) {
 
   let index = { mode: 'passthrough', size: resolved.size, reason: 'not_mp4' };
   const probeOnly = isMp4(media) && isMp4ProbeRange(range);
+  const prepareOnly = String(req.query?.prepare || '') === '1';
   if (probeOnly) {
     index = { mode: 'probe-passthrough', size: resolved.size, reason: 'browser_probe' };
   } else if (
     isMp4(media) &&
     process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false' &&
-    (req.method !== 'HEAD' || String(req.query?.prepare || '') === '1')
+    (req.method !== 'HEAD' || prepareOnly)
   ) {
     const indexStartedAt = Date.now();
     const documentId = String(resolved.document?.id || row.id);
@@ -151,6 +152,14 @@ async function streamMtproto(req, res, row, media) {
     appendServerTiming(res, 'mp4-index', Date.now() - indexStartedAt);
   }
 
+  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
+  res.setHeader('X-MP4-Layout', index.mode);
+  res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
+  if (prepareOnly) {
+    res.statusCode = 204;
+    return { ok: true, prepared: true };
+  }
+
   res.statusCode = range.partial ? 206 : 200;
   res.setHeader('Content-Type', media.mimeType);
   res.setHeader('Accept-Ranges', 'bytes');
@@ -158,9 +167,6 @@ async function streamMtproto(req, res, row, media) {
   if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${resolved.size}`);
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
   res.setHeader('Cache-Control', 'private, max-age=300');
-  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
-  res.setHeader('X-MP4-Layout', index.mode);
-  res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
   if (req.method === 'HEAD') return { ok: true };
 
   const abortController = new AbortController();
@@ -207,7 +213,8 @@ export default async function handler(req, res) {
     if (!access.ok) return json(res, access.status, { ok: false, error: access.error });
 
     const startedAt = Date.now();
-    if (String(req.query?.stream || '') !== '1') {
+    const prepareOnly = String(req.query?.prepare || '') === '1';
+    if (!prepareOnly && String(req.query?.stream || '') !== '1') {
       await getMtprotoClient();
       res.setHeader('Server-Timing', `mtproto-warmup;dur=${Date.now() - startedAt}`);
       res.statusCode = 204;

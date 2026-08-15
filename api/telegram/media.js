@@ -211,12 +211,13 @@ async function streamViaBotApi(req, res, row, media) {
 
   let index = { mode: 'passthrough', size: media.size, reason: 'not_mp4' };
   const probeOnly = isMp4(media) && isMp4ProbeRange(range);
+  const prepareOnly = String(req.query?.prepare || '') === '1';
   if (probeOnly) {
     index = { mode: 'probe-passthrough', size: media.size, reason: 'browser_probe' };
   } else if (
     isMp4(media) &&
     process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false' &&
-    (req.method !== 'HEAD' || String(req.query?.prepare || '') === '1')
+    (req.method !== 'HEAD' || prepareOnly)
   ) {
     const indexStartedAt = Date.now();
     index = await cachedFastStartIndex(
@@ -226,10 +227,15 @@ async function streamViaBotApi(req, res, row, media) {
     appendServerTiming(res, 'mp4-index', Date.now() - indexStartedAt);
   }
 
-  res.statusCode = range.partial ? 206 : 200;
   res.setHeader('X-Telegram-Media-Transport', 'bot-api');
   res.setHeader('X-MP4-Layout', index.mode);
   res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
+  if (prepareOnly) {
+    res.statusCode = 204;
+    return res.end();
+  }
+
+  res.statusCode = range.partial ? 206 : 200;
   res.setHeader('Content-Type', media.mimeType);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', String(range.end - range.start + 1));
