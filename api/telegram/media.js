@@ -1,4 +1,3 @@
-import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import { json } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
@@ -11,7 +10,6 @@ const BOT_FILE_PATH_TTL_MS = 50 * 60 * 1000;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const botFilePathCache = new Map();
-let mtprotoModulePromise = null;
 
 class GatewayError extends Error {
   constructor(code, status) {
@@ -29,16 +27,6 @@ function appendServerTiming(res, name, durationMs) {
   const metric = `${name};dur=${Math.max(0, Math.round(durationMs))}`;
   const current = String(res.getHeader('Server-Timing') || '').trim();
   res.setHeader('Server-Timing', current ? `${current}, ${metric}` : metric);
-}
-
-function mtprotoModule() {
-  if (!mtprotoModulePromise) {
-    mtprotoModulePromise = import('../../lib/mtproto-media.js').catch((error) => {
-      mtprotoModulePromise = null;
-      throw error;
-    });
-  }
-  return mtprotoModulePromise;
 }
 
 async function botFilePath(fileId) {
@@ -119,48 +107,6 @@ async function resolveTicketMedia(ticketToken) {
   return { ticket, row, media };
 }
 
-function parseRange(rangeHeader, size) {
-  const raw = String(rangeHeader || '').trim();
-  if (!raw) return { partial: false, start: 0, end: size - 1 };
-  if (!raw.startsWith('bytes=') || raw.includes(',')) throw new GatewayError('range_not_satisfiable', 416);
-
-  const spec = raw.slice(6).trim();
-  const match = /^(\d*)-(\d*)$/.exec(spec);
-  if (!match || (!match[1] && !match[2])) throw new GatewayError('range_not_satisfiable', 416);
-
-  let start;
-  let end;
-  if (!match[1]) {
-    const suffix = Number.parseInt(match[2], 10);
-    if (!Number.isSafeInteger(suffix) || suffix <= 0) throw new GatewayError('range_not_satisfiable', 416);
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    start = Number.parseInt(match[1], 10);
-    if (!Number.isSafeInteger(start) || start < 0 || start >= size) {
-      throw new GatewayError('range_not_satisfiable', 416);
-    }
-    if (match[2]) {
-      end = Number.parseInt(match[2], 10);
-      if (!Number.isSafeInteger(end) || end < start) throw new GatewayError('range_not_satisfiable', 416);
-      end = Math.min(end, size - 1);
-    } else {
-      end = size - 1;
-    }
-  }
-  return { partial: true, start, end };
-}
-
-function setMediaHeaders(res, media, size, range) {
-  res.statusCode = range.partial ? 206 : 200;
-  res.setHeader('Content-Type', media.mimeType || 'application/octet-stream');
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('Content-Length', String(range.end - range.start + 1));
-  if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
-  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name || 'telegram-media')}`);
-  res.setHeader('Cache-Control', 'private, max-age=300');
-}
-
 async function streamViaBotApi(req, res, media) {
   if (!media.fileId) throw new GatewayError('media_file_id_missing', 409);
   const getFileStartedAt = Date.now();
@@ -200,69 +146,6 @@ async function streamViaBotApi(req, res, media) {
   Readable.fromWeb(upstream.body).pipe(res);
 }
 
-async function streamViaMtproto(req, res, row, media) {
-  const {
-    resolveMtprotoDocument,
-    resetMtprotoClient,
-    streamResolvedMtprotoRange
-  } = await mtprotoModule();
-  const sourceRows = await select(
-    TABLES.sources,
-    `select=id,chat_id&id=eq.${encodeURIComponent(row.source_id)}&limit=1`
-  );
-  const source = Array.isArray(sourceRows) ? sourceRows[0] || null : null;
-  if (!source?.chat_id) throw new GatewayError('telegram_source_missing', 404);
-
-  let resolved;
-  const resolveStartedAt = Date.now();
-  try {
-    resolved = await resolveMtprotoDocument({
-      chatId: source.chat_id,
-      messageId: row.source_message_id
-    });
-  } catch (error) {
-    resetMtprotoClient();
-    throw error;
-  }
-  appendServerTiming(res, 'mtproto-resolve', Date.now() - resolveStartedAt);
-
-  const size = resolved.size;
-  let range;
-  try {
-    range = parseRange(req.headers.range, size);
-  } catch (error) {
-    if (error?.status === 416) res.setHeader('Content-Range', `bytes */${size}`);
-    throw error;
-  }
-  setMediaHeaders(res, media, size, range);
-  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
-  if (req.method === 'HEAD') return res.end();
-
-  const abortController = new AbortController();
-  const onClose = () => {
-    if (!res.writableEnded) abortController.abort();
-  };
-  res.once('close', onClose);
-
-  try {
-    await streamResolvedMtprotoRange({
-      resolved,
-      start: range.start,
-      end: range.end,
-      signal: abortController.signal,
-      onChunk: async (chunk) => {
-        if (!res.write(chunk)) await once(res, 'drain');
-      }
-    });
-    res.end();
-  } catch (error) {
-    if (error?.code !== 'request_aborted') resetMtprotoClient();
-    throw error;
-  } finally {
-    res.off('close', onClose);
-  }
-}
-
 export default async function handler(req, res) {
   const requestStartedAt = Date.now();
   res.setHeader('Cache-Control', 'private, no-store');
@@ -273,12 +156,14 @@ export default async function handler(req, res) {
 
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
-    const { row, media } = await resolveTicketMedia(ticketToken);
+    const { media } = await resolveTicketMedia(ticketToken);
     appendServerTiming(res, 'ticket-media', Date.now() - requestStartedAt);
     if (media.size > BOT_API_DOWNLOAD_LIMIT || !media.fileId) {
-      await streamViaMtproto(req, res, row, media);
-      console.info(`[telegram-media-gateway] transport=mtproto method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
-      return;
+      res.statusCode = 307;
+      res.setHeader('Location', `/api/telegram/warmup?stream=1&ticket=${encodeURIComponent(ticketToken)}`);
+      res.setHeader('X-Telegram-Media-Transport', 'mtproto-redirect');
+      console.info(`[telegram-media-gateway] transport=mtproto-redirect method=${req.method} size=${media.size} elapsed_ms=${Date.now() - requestStartedAt}`);
+      return res.end();
     }
     await streamViaBotApi(req, res, media);
     console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
