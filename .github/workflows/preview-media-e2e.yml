@@ -51,18 +51,33 @@ jobs:
             bot: feed.posts.find((post) => post.media?.delivery === 'telegram_gateway_bot'),
             mtproto: feed.posts.find((post) => post.media?.delivery === 'telegram_gateway_mtproto')
           };
-          for (const [name, post] of Object.entries(targets)) {
-            if (!post?.media?.url) throw new Error(`missing ${name} target`);
-            const play = new URL(post.media.url);
-            const prepare = new URL(post.media.url);
-            for (const url of [play, prepare]) {
-              url.protocol = 'https:';
-              url.host = new URL(process.env.CLONER_ORIGIN).host;
+          (async () => {
+            for (const [name, post] of Object.entries(targets)) {
+              const fallback = post?.media?.fallbackUrl || post?.media?.url;
+              if (!fallback) throw new Error(`missing ${name} fallback`);
+              const ticketResponse = await fetch(new URL(fallback, process.env.LMS_ORIGIN), {
+                headers: {
+                  'X-LMS-Session-Id': '__clone_factory_test_lms_mobile_perf_20260815',
+                  'X-LMS-Device-Id': '__clone_factory_test_lms_device_20260815',
+                  'User-Agent': '__clone_factory_test Safari iOS'
+                },
+                redirect: 'manual'
+              });
+              const location = ticketResponse.headers.get('location');
+              if (ticketResponse.status !== 307 || !location) throw new Error(`${name} ticket redirect failed`);
+              const play = new URL(location);
+              play.protocol = 'https:';
+              play.host = new URL(process.env.CLONER_ORIGIN).host;
+              if (name === 'mtproto') {
+                play.pathname = '/api/telegram/warmup';
+                play.searchParams.set('stream', '1');
+              }
+              const prepare = new URL(play);
+              prepare.searchParams.set('prepare', '1');
+              fs.writeFileSync(path.join(process.env.WORK_DIR, `${name}.play`), play.toString(), { mode: 0o600 });
+              fs.writeFileSync(path.join(process.env.WORK_DIR, `${name}.prepare`), prepare.toString(), { mode: 0o600 });
             }
-            prepare.searchParams.set('prepare', '1');
-            fs.writeFileSync(path.join(process.env.WORK_DIR, `${name}.play`), play.toString(), { mode: 0o600 });
-            fs.writeFileSync(path.join(process.env.WORK_DIR, `${name}.prepare`), prepare.toString(), { mode: 0o600 });
-          }
+          })().catch((error) => { console.error(error.message); process.exit(1); });
           NODE
 
           request() {
