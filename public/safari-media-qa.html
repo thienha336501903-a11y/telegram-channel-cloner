@@ -9,7 +9,7 @@
 </head>
 <body><div class="wrap">
 <h1>iPhone Safari video startup QA</h1>
-<p>Chạm từng nút một. Trang dùng thẻ &lt;video&gt; thật để Safari tự tạo các Range request giống lúc học viên bấm Play.</p>
+<p>Chạm từng nút một. Trang dùng thẻ &lt;video&gt; thật để Safari tự tạo Range request giống lúc học viên bấm Play.</p>
 <div id="bot" class="card"></div>
 <div id="mtproto" class="card"></div>
 <div class="card"><div class="muted">Sau khi test xong cả hai, quay lại ChatGPT và chỉ cần nhắn: <b>QA xong</b>.</div></div>
@@ -25,21 +25,41 @@
   const end=Math.max(2,Math.min(999999,Math.round(ms)));
   fetch(t.src,{method:'HEAD',headers:{Range:`bytes=1-${end}`},cache:'no-store',credentials:'same-origin'}).catch(()=>{});
  }
+ async function diagnose(t){
+  try{
+   const r=await fetch(t.src,{headers:{Range:'bytes=0-1'},cache:'no-store',credentials:'same-origin'});
+   let detail='';
+   if(!r.ok){
+    try{const data=await r.json();detail=data?.error?` / ${data.error}`:''}catch{}
+   }
+   return `HTTP ${r.status}${detail}`;
+  }catch(err){return `HTTP diagnostic failed: ${err?.message||err}`}
+ }
  function setup(t){
   const root=document.getElementById(t.id);
   root.innerHTML=`<strong>${t.name}</strong><div class="muted">Đo từ lúc chạm nút tới event playing đầu tiên.</div><button type="button">▶ Test Play</button><video controls playsinline preload="none"></video><div class="status">Chưa chạy.</div>`;
   const btn=root.querySelector('button'),v=root.querySelector('video'),s=root.querySelector('.status');
-  let t0=0,done=false,events=[];
-  const log=(name)=>{if(!t0)return;const ms=Math.round(performance.now()-t0);events.push(`${name}: ${ms} ms`);s.textContent=events.join('\n')};
-  ['loadstart','loadedmetadata','loadeddata','canplay','waiting','stalled','suspend','error'].forEach(ev=>v.addEventListener(ev,()=>log(ev)));
+  let t0=0,done=false,diagnosing=false,events=[];
+  const render=()=>{s.textContent=events.join('\n')};
+  const log=(name)=>{if(!t0)return;const ms=Math.round(performance.now()-t0);events.push(`${name}: ${ms} ms`);render()};
+  async function showFailure(reason){
+   if(diagnosing)return;diagnosing=true;
+   const ms=Math.round(performance.now()-t0);
+   const http=await diagnose(t);
+   const expired=/HTTP 403/.test(http);
+   s.innerHTML=`<span class="bad">${expired?'TICKET HẾT HẠN / KHÔNG HỢP LỆ':'KHÔNG PHÁT ĐƯỢC'} — ${http}</span>\n${reason}: ${ms} ms\n`+events.join('\n');
+   btn.disabled=false;diagnosing=false;
+  }
+  ['loadstart','loadedmetadata','loadeddata','canplay','waiting','stalled','suspend'].forEach(ev=>v.addEventListener(ev,()=>log(ev)));
+  v.addEventListener('error',()=>{log('error');showFailure('media error')});
   v.addEventListener('playing',()=>{log('playing');if(!done){done=true;const ms=Math.round(performance.now()-t0);s.innerHTML=`<span class="ok">PLAYING sau ${ms} ms</span>\n`+events.join('\n');sendMetric(t,ms);btn.disabled=false;btn.textContent='↻ Test lại'}});
   btn.addEventListener('click',()=>{
    try{v.pause()}catch{}
    v.removeAttribute('src');v.load();
-   events=[];done=false;t0=performance.now();btn.disabled=true;s.textContent='Đang đo…';
+   events=[];done=false;diagnosing=false;t0=performance.now();btn.disabled=true;s.textContent='Đang đo…';
    v.src=t.src;v.load();
-   const p=v.play();if(p&&p.catch)p.catch(err=>{log('play rejected: '+(err?.message||err));btn.disabled=false});
-   setTimeout(()=>{if(!done){const ms=Math.round(performance.now()-t0);s.innerHTML=`<span class="bad">Chưa PLAYING sau ${ms} ms</span>\n`+events.join('\n');btn.disabled=false}},12000);
+   const p=v.play();if(p&&p.catch)p.catch(err=>{log('play rejected: '+(err?.message||err));showFailure('play rejected')});
+   setTimeout(()=>{if(!done&&!diagnosing){showFailure('timeout 12s')}},12000);
   });
  }
  tests.forEach(setup);
