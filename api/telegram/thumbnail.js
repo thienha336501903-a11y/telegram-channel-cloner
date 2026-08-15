@@ -83,7 +83,8 @@ async function streamThumbnail(req, res, thumbnail) {
   if (!upstream.ok || !upstream.body) throw new GatewayError('telegram_file_fetch_failed', 502);
 
   res.statusCode = 200;
-  res.setHeader('Content-Type', upstream.headers.get('content-type') || thumbnail.mimeType);
+  const upstreamType = String(upstream.headers.get('content-type') || '').toLowerCase();
+  res.setHeader('Content-Type', upstreamType.startsWith('image/') ? upstreamType : thumbnail.mimeType);
   const length = upstream.headers.get('content-length');
   if (length) res.setHeader('Content-Length', length);
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(thumbnail.name)}`);
