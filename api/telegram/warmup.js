@@ -156,6 +156,7 @@ async function streamMtproto(req, res, row, media) {
   res.setHeader('Cache-Control', 'private, max-age=300');
   res.setHeader('X-Telegram-Media-Transport', 'mtproto');
   res.setHeader('X-MP4-Layout', index.mode);
+  res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
   if (req.method === 'HEAD') return { ok: true };
 
   const abortController = new AbortController();
@@ -214,7 +215,7 @@ export default async function handler(req, res) {
     appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
     const streamed = await streamMtproto(req, res, resolved.row, resolved.media);
     if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
-    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
+    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
     if (!res.writableEnded) res.end();
   } catch (error) {
     console.error('[telegram-mtproto-warmup]', error?.message || error);

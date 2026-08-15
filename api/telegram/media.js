@@ -225,6 +225,7 @@ async function streamViaBotApi(req, res, row, media) {
   res.statusCode = range.partial ? 206 : 200;
   res.setHeader('X-Telegram-Media-Transport', 'bot-api');
   res.setHeader('X-MP4-Layout', index.mode);
+  res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
   res.setHeader('Content-Type', media.mimeType);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', String(range.end - range.start + 1));
@@ -273,7 +274,7 @@ export default async function handler(req, res) {
       return res.end();
     }
     await streamViaBotApi(req, res, row, media);
-    console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
+    console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'media_gateway_failed';
     const status = Number(error?.status || 500);

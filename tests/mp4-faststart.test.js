@@ -128,7 +128,9 @@ test('deduplicates concurrent index probes in one warm function instance', async
     cachedFastStartIndex('same-video', build)
   ]);
   assert.equal(builds, 1);
-  assert.equal(first, second);
+  assert.equal(first.mode, second.mode);
+  assert.equal(first.cacheSource, 'build');
+  assert.equal(second.cacheSource, 'memory');
 });
 
 test('reuses a serialized fast-start index across function instances', async () => {
@@ -151,6 +153,7 @@ test('reuses a serialized fast-start index across function instances', async () 
 
   assert.equal(builds, 1);
   assert.equal(first.mode, 'virtual-faststart');
+  assert.equal(first.cacheSource, 'build');
   assert.equal(second.mode, 'virtual-faststart');
   assert.equal(second.cacheSource, 'runtime');
   assert.deepEqual(second.prefix, first.prefix);
