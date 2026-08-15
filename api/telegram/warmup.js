@@ -134,7 +134,11 @@ async function streamMtproto(req, res, row, media) {
   const probeOnly = isMp4(media) && isMp4ProbeRange(range);
   if (probeOnly) {
     index = { mode: 'probe-passthrough', size: resolved.size, reason: 'browser_probe' };
-  } else if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+  } else if (
+    isMp4(media) &&
+    process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false' &&
+    (req.method !== 'HEAD' || String(req.query?.prepare || '') === '1')
+  ) {
     const indexStartedAt = Date.now();
     const documentId = String(resolved.document?.id || row.id);
     index = await cachedFastStartIndex(

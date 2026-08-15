@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   buildFastStartIndex,
   cachedFastStartIndex,
@@ -158,4 +159,13 @@ test('reuses a serialized fast-start index across function instances', async () 
   assert.equal(second.cacheSource, 'runtime');
   assert.deepEqual(second.prefix, first.prefix);
   assert.deepEqual(second.moov, first.moov);
+});
+
+test('ticketed HEAD warm-up prepares MP4 metadata without streaming a body', () => {
+  const bot = readFileSync(new URL('../api/telegram/media.js', import.meta.url), 'utf8');
+  const mtproto = readFileSync(new URL('../api/telegram/warmup.js', import.meta.url), 'utf8');
+  for (const handler of [bot, mtproto]) {
+    assert.match(handler, /req\.method !== 'HEAD' \|\| String\(req\.query\?\.prepare \|\| ''\) === '1'/);
+    assert.match(handler, /if \(req\.method === 'HEAD'\)/);
+  }
 });
