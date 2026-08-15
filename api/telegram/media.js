@@ -1,9 +1,16 @@
 import { Readable } from 'node:stream';
+import { once } from 'node:events';
 import { json } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { telegram } from '../../lib/telegram.js';
+import {
+  buildFastStartIndex,
+  cachedFastStartIndex,
+  parseByteRange,
+  streamIndexedRange
+} from '../../lib/mp4-faststart.js';
 
 const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const BOT_FILE_PATH_TTL_MS = 50 * 60 * 1000;
@@ -107,43 +114,108 @@ async function resolveTicketMedia(ticketToken) {
   return { ticket, row, media };
 }
 
-async function streamViaBotApi(req, res, media) {
+function isMp4(media) {
+  return String(media.mimeType || '').toLowerCase() === 'video/mp4' || String(media.name || '').toLowerCase().endsWith('.mp4');
+}
+
+async function fetchBotRange(url, start, end, signal) {
+  const upstream = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal });
+  const wholeFile = start === 0 && Number(upstream.headers.get('content-length') || 0) === end + 1;
+  if ((!upstream.ok && upstream.status !== 206) || (upstream.status !== 206 && !wholeFile)) {
+    throw new GatewayError('telegram_file_range_failed', 502);
+  }
+  return upstream;
+}
+
+async function readBotRange(url, start, end) {
+  const upstream = await fetchBotRange(url, start, end);
+  const bytes = Buffer.from(await upstream.arrayBuffer());
+  const expected = end - start + 1;
+  if (bytes.length !== expected) throw new GatewayError('telegram_file_range_incomplete', 502);
+  return bytes;
+}
+
+async function streamBotRange(url, start, end, signal, onChunk) {
+  const upstream = await fetchBotRange(url, start, end, signal);
+  if (!upstream.body) throw new GatewayError('telegram_file_fetch_failed', 502);
+  const readable = Readable.fromWeb(upstream.body);
+  try {
+    for await (const chunk of readable) {
+      if (signal?.aborted) {
+        const error = new Error('Media request aborted');
+        error.code = 'request_aborted';
+        throw error;
+      }
+      await onChunk(Buffer.from(chunk));
+    }
+  } finally {
+    if (signal?.aborted) readable.destroy();
+  }
+}
+
+async function writeChunk(res, chunk) {
+  if (res.destroyed) {
+    const error = new Error('Media request aborted');
+    error.code = 'request_aborted';
+    throw error;
+  }
+  if (!res.write(chunk)) await once(res, 'drain');
+}
+
+async function streamViaBotApi(req, res, row, media) {
   if (!media.fileId) throw new GatewayError('media_file_id_missing', 409);
   const getFileStartedAt = Date.now();
   const fileInfo = await botFilePath(media.fileId);
   appendServerTiming(res, fileInfo.cached ? 'bot-file-cache' : 'bot-get-file', Date.now() - getFileStartedAt);
 
   const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
-  const upstreamHeaders = {};
-  const range = String(req.headers.range || '').trim();
-  if (range) upstreamHeaders.Range = range;
-
-  const upstreamStartedAt = Date.now();
-  const upstream = await fetch(
-    `https://api.telegram.org/file/bot${botToken}/${fileInfo.path}`,
-    { headers: upstreamHeaders }
-  );
-  if ((!upstream.ok && upstream.status !== 206) || !upstream.body) {
-    throw new GatewayError('telegram_file_fetch_failed', 502);
+  const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.path}`;
+  const range = parseByteRange(req.headers.range, media.size);
+  if (!range) {
+    res.statusCode = 416;
+    res.setHeader('Content-Range', `bytes */${media.size}`);
+    return res.end();
   }
-  appendServerTiming(res, 'telegram-file-headers', Date.now() - upstreamStartedAt);
 
-  res.statusCode = upstream.status;
+  let index = { mode: 'passthrough', size: media.size, reason: 'not_mp4' };
+  if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+    const indexStartedAt = Date.now();
+    index = await cachedFastStartIndex(
+      `bot:${row.id}:${media.fileId}:${media.size}`,
+      () => buildFastStartIndex({ size: media.size, readRange: (start, end) => readBotRange(fileUrl, start, end) })
+    );
+    appendServerTiming(res, 'mp4-index', Date.now() - indexStartedAt);
+  }
+
+  res.statusCode = range.partial ? 206 : 200;
   res.setHeader('X-Telegram-Media-Transport', 'bot-api');
-  res.setHeader('Content-Type', upstream.headers.get('content-type') || media.mimeType);
-  res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
-  const length = upstream.headers.get('content-length');
-  const contentRange = upstream.headers.get('content-range');
-  if (length) res.setHeader('Content-Length', length);
-  if (contentRange) res.setHeader('Content-Range', contentRange);
+  res.setHeader('X-MP4-Layout', index.mode);
+  res.setHeader('Content-Type', media.mimeType);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Length', String(range.end - range.start + 1));
+  if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${media.size}`);
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name || 'telegram-media')}`);
   res.setHeader('Cache-Control', 'private, max-age=300');
 
-  if (req.method === 'HEAD') {
-    try { await upstream.body.cancel(); } catch {}
-    return res.end();
+  if (req.method === 'HEAD') return res.end();
+
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) abortController.abort();
+  };
+  res.once('close', onClose);
+  try {
+    await streamIndexedRange({
+      index,
+      start: range.start,
+      end: range.end,
+      streamOriginal: (start, end, onChunk) => streamBotRange(fileUrl, start, end, abortController.signal, onChunk),
+      onChunk: chunk => writeChunk(res, chunk)
+    });
+    res.end();
+  } finally {
+    res.off('close', onClose);
   }
-  Readable.fromWeb(upstream.body).pipe(res);
 }
 
 export default async function handler(req, res) {
@@ -156,7 +228,7 @@ export default async function handler(req, res) {
 
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
-    const { media } = await resolveTicketMedia(ticketToken);
+    const { row, media } = await resolveTicketMedia(ticketToken);
     appendServerTiming(res, 'ticket-media', Date.now() - requestStartedAt);
     if (media.size > BOT_API_DOWNLOAD_LIMIT || !media.fileId) {
       res.statusCode = 307;
@@ -165,12 +237,14 @@ export default async function handler(req, res) {
       console.info(`[telegram-media-gateway] transport=mtproto-redirect method=${req.method} size=${media.size} elapsed_ms=${Date.now() - requestStartedAt}`);
       return res.end();
     }
-    await streamViaBotApi(req, res, media);
+    await streamViaBotApi(req, res, row, media);
     console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'media_gateway_failed';
     const status = Number(error?.status || 500);
-    console.error('[telegram-media-gateway]', code, error?.message || error, `elapsed_ms=${Date.now() - requestStartedAt}`);
+    if (code !== 'request_aborted' && error?.name !== 'AbortError') {
+      console.error('[telegram-media-gateway]', code, error?.message || error, `elapsed_ms=${Date.now() - requestStartedAt}`);
+    }
     if (!res.headersSent) return json(res, status, { ok: false, error: code });
     if (!res.writableEnded) res.end();
   }

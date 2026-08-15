@@ -4,6 +4,12 @@ import { requireEnv } from '../../lib/env.js';
 import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import {
+  buildFastStartIndex,
+  cachedFastStartIndex,
+  parseByteRange,
+  streamIndexedRange
+} from '../../lib/mp4-faststart.js';
+import {
   getMtprotoClient,
   resolveMtprotoDocument,
   resetMtprotoClient,
@@ -81,27 +87,19 @@ async function resolveTicketMedia(ticket) {
   return { ok: true, row, media };
 }
 
-function parseRange(rangeHeader, size) {
-  const raw = String(rangeHeader || '').trim();
-  if (!raw) return { partial: false, start: 0, end: size - 1 };
-  if (!raw.startsWith('bytes=') || raw.includes(',')) return null;
-  const match = /^(\d*)-(\d*)$/.exec(raw.slice(6).trim());
-  if (!match || (!match[1] && !match[2])) return null;
-  let start;
-  let end;
-  if (!match[1]) {
-    const suffix = Number.parseInt(match[2], 10);
-    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    start = Number.parseInt(match[1], 10);
-    if (!Number.isSafeInteger(start) || start < 0 || start >= size) return null;
-    end = match[2] ? Number.parseInt(match[2], 10) : size - 1;
-    if (!Number.isSafeInteger(end) || end < start) return null;
-    end = Math.min(end, size - 1);
-  }
-  return { partial: true, start, end };
+function isMp4(media) {
+  return String(media.mimeType || '').toLowerCase() === 'video/mp4' || String(media.name || '').toLowerCase().endsWith('.mp4');
+}
+
+async function readResolvedRange(resolved, start, end) {
+  const chunks = [];
+  await streamResolvedMtprotoRange({
+    resolved,
+    start,
+    end,
+    onChunk: async chunk => chunks.push(Buffer.from(chunk))
+  });
+  return Buffer.concat(chunks);
 }
 
 async function streamMtproto(req, res, row, media) {
@@ -125,10 +123,24 @@ async function streamMtproto(req, res, row, media) {
   }
   appendServerTiming(res, 'mtproto-resolve', Date.now() - resolveStartedAt);
 
-  const range = parseRange(req.headers.range, resolved.size);
+  const range = parseByteRange(req.headers.range, resolved.size);
   if (!range) {
     res.setHeader('Content-Range', `bytes */${resolved.size}`);
     return { ok: false, status: 416, error: 'range_not_satisfiable' };
+  }
+
+  let index = { mode: 'passthrough', size: resolved.size, reason: 'not_mp4' };
+  if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+    const indexStartedAt = Date.now();
+    const documentId = String(resolved.document?.id || row.id);
+    index = await cachedFastStartIndex(
+      `mtproto:${row.id}:${documentId}:${resolved.size}`,
+      () => buildFastStartIndex({
+        size: resolved.size,
+        readRange: (start, end) => readResolvedRange(resolved, start, end)
+      })
+    );
+    appendServerTiming(res, 'mp4-index', Date.now() - indexStartedAt);
   }
 
   res.statusCode = range.partial ? 206 : 200;
@@ -139,6 +151,7 @@ async function streamMtproto(req, res, row, media) {
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
   res.setHeader('Cache-Control', 'private, max-age=300');
   res.setHeader('X-Telegram-Media-Transport', 'mtproto');
+  res.setHeader('X-MP4-Layout', index.mode);
   if (req.method === 'HEAD') return { ok: true };
 
   const abortController = new AbortController();
@@ -147,12 +160,18 @@ async function streamMtproto(req, res, row, media) {
   };
   res.once('close', onClose);
   try {
-    await streamResolvedMtprotoRange({
-      resolved,
+    await streamIndexedRange({
+      index,
       start: range.start,
       end: range.end,
-      signal: abortController.signal,
-      onChunk: async (chunk) => {
+      streamOriginal: (start, end, onChunk) => streamResolvedMtprotoRange({
+        resolved,
+        start,
+        end,
+        signal: abortController.signal,
+        onChunk
+      }),
+      onChunk: async chunk => {
         if (!res.write(chunk)) await once(res, 'drain');
       }
     });
