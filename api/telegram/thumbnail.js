@@ -7,6 +7,8 @@ import { telegram } from '../../lib/telegram.js';
 
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BOT_FILE_PATH_TTL_MS = 50 * 60 * 1000;
+const botFilePathCache = new Map();
 
 class GatewayError extends Error {
   constructor(code, status) {
@@ -18,6 +20,24 @@ class GatewayError extends Error {
 
 function clean(value) {
   return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
+}
+
+function appendServerTiming(res, name, durationMs) {
+  const metric = `${name};dur=${Math.max(0, Math.round(durationMs))}`;
+  const current = String(res.getHeader('Server-Timing') || '').trim();
+  res.setHeader('Server-Timing', current ? `${current}, ${metric}` : metric);
+}
+
+async function botFilePath(fileId) {
+  const cached = botFilePathCache.get(fileId);
+  if (cached && cached.expiresAt > Date.now()) return { path: cached.path, cached: true };
+  const fileInfo = await telegram('getFile', { file_id: fileId });
+  if (!fileInfo?.file_path) throw new GatewayError('telegram_get_file_failed', 502);
+  botFilePathCache.set(fileId, {
+    path: fileInfo.file_path,
+    expiresAt: Date.now() + BOT_FILE_PATH_TTL_MS
+  });
+  return { path: fileInfo.file_path, cached: false };
 }
 
 function supabaseHeaders() {
@@ -76,11 +96,14 @@ async function resolveTicketThumbnail(ticketToken) {
 }
 
 async function streamThumbnail(req, res, thumbnail) {
-  const fileInfo = await telegram('getFile', { file_id: thumbnail.fileId });
-  if (!fileInfo?.file_path) throw new GatewayError('telegram_get_file_failed', 502);
+  const getFileStartedAt = Date.now();
+  const fileInfo = await botFilePath(thumbnail.fileId);
+  appendServerTiming(res, fileInfo.cached ? 'thumbnail-file-cache' : 'thumbnail-get-file', Date.now() - getFileStartedAt);
   const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
-  const upstream = await fetch(`https://api.telegram.org/file/bot${botToken}/${fileInfo.file_path}`);
+  const upstreamStartedAt = Date.now();
+  const upstream = await fetch(`https://api.telegram.org/file/bot${botToken}/${fileInfo.path}`);
   if (!upstream.ok || !upstream.body) throw new GatewayError('telegram_file_fetch_failed', 502);
+  appendServerTiming(res, 'thumbnail-file-headers', Date.now() - upstreamStartedAt);
 
   res.statusCode = 200;
   const upstreamType = String(upstream.headers.get('content-type') || '').toLowerCase();
@@ -99,6 +122,7 @@ async function streamThumbnail(req, res, thumbnail) {
 }
 
 export default async function handler(req, res) {
+  const requestStartedAt = Date.now();
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -108,7 +132,9 @@ export default async function handler(req, res) {
   try {
     const ticketToken = String(req.query?.ticket || '').trim();
     const thumbnail = await resolveTicketThumbnail(ticketToken);
+    appendServerTiming(res, 'ticket-thumbnail', Date.now() - requestStartedAt);
     await streamThumbnail(req, res, thumbnail);
+    console.info(`[telegram-thumbnail-gateway] method=${req.method} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'thumbnail_gateway_failed';
     const status = Number(error?.status || 500);
