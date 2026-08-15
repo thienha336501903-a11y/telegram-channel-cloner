@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   buildFastStartIndex,
   cachedFastStartIndex,
   clearFastStartIndexCache,
+  isMp4ProbeRange,
   parseByteRange,
   streamIndexedRange,
   virtualRangeParts
@@ -109,6 +111,12 @@ test('parses browser byte ranges including suffix ranges', () => {
   assert.equal(parseByteRange('bytes=0-1,4-5', 100), null);
 });
 
+test('recognizes Safari two-byte media probes without indexing the MP4', () => {
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=0-1', 100)), true);
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=0-2', 100)), false);
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=1-2', 100)), false);
+});
+
 test('deduplicates concurrent index probes in one warm function instance', async () => {
   clearFastStartIndexCache();
   let builds = 0;
@@ -121,5 +129,44 @@ test('deduplicates concurrent index probes in one warm function instance', async
     cachedFastStartIndex('same-video', build)
   ]);
   assert.equal(builds, 1);
-  assert.equal(first, second);
+  assert.equal(first.mode, second.mode);
+  assert.equal(first.cacheSource, 'build');
+  assert.equal(second.cacheSource, 'memory');
+});
+
+test('reuses a serialized fast-start index across function instances', async () => {
+  clearFastStartIndexCache();
+  const values = new Map();
+  const sharedCache = {
+    get: async key => values.get(key) || null,
+    set: async (key, value) => values.set(key, value)
+  };
+  const source = fixture();
+  let builds = 0;
+  const build = async () => {
+    builds += 1;
+    return buildFastStartIndex({ size: source.file.length, readRange: reader(source.file) });
+  };
+
+  const first = await cachedFastStartIndex('shared-video', build, { sharedCache });
+  clearFastStartIndexCache();
+  const second = await cachedFastStartIndex('shared-video', build, { sharedCache });
+
+  assert.equal(builds, 1);
+  assert.equal(first.mode, 'virtual-faststart');
+  assert.equal(first.cacheSource, 'build');
+  assert.equal(second.mode, 'virtual-faststart');
+  assert.equal(second.cacheSource, 'runtime');
+  assert.deepEqual(second.prefix, first.prefix);
+  assert.deepEqual(second.moov, first.moov);
+});
+
+test('ticketed prepare mode builds MP4 metadata and returns 204 without a body', () => {
+  const bot = readFileSync(new URL('../api/telegram/media.js', import.meta.url), 'utf8');
+  const mtproto = readFileSync(new URL('../api/telegram/warmup.js', import.meta.url), 'utf8');
+  for (const handler of [bot, mtproto]) {
+    assert.match(handler, /const prepareOnly = String\(req\.query\?\.prepare \|\| ''\) === '1'/);
+    assert.match(handler, /if \(prepareOnly\) \{/);
+    assert.match(handler, /res\.statusCode = 204/);
+  }
 });

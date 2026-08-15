@@ -6,6 +6,7 @@ import { TABLES } from '../../lib/tables.js';
 import {
   buildFastStartIndex,
   cachedFastStartIndex,
+  isMp4ProbeRange,
   parseByteRange,
   streamIndexedRange
 } from '../../lib/mp4-faststart.js';
@@ -130,7 +131,15 @@ async function streamMtproto(req, res, row, media) {
   }
 
   let index = { mode: 'passthrough', size: resolved.size, reason: 'not_mp4' };
-  if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+  const probeOnly = isMp4(media) && isMp4ProbeRange(range);
+  const prepareOnly = String(req.query?.prepare || '') === '1';
+  if (probeOnly) {
+    index = { mode: 'probe-passthrough', size: resolved.size, reason: 'browser_probe' };
+  } else if (
+    isMp4(media) &&
+    process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false' &&
+    (req.method !== 'HEAD' || prepareOnly)
+  ) {
     const indexStartedAt = Date.now();
     const documentId = String(resolved.document?.id || row.id);
     index = await cachedFastStartIndex(
@@ -143,6 +152,14 @@ async function streamMtproto(req, res, row, media) {
     appendServerTiming(res, 'mp4-index', Date.now() - indexStartedAt);
   }
 
+  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
+  res.setHeader('X-MP4-Layout', index.mode);
+  res.setHeader('X-MP4-Index-Cache', index.cacheSource || (probeOnly ? 'skipped-probe' : 'none'));
+  if (prepareOnly) {
+    res.statusCode = 204;
+    return { ok: true, prepared: true };
+  }
+
   res.statusCode = range.partial ? 206 : 200;
   res.setHeader('Content-Type', media.mimeType);
   res.setHeader('Accept-Ranges', 'bytes');
@@ -150,8 +167,6 @@ async function streamMtproto(req, res, row, media) {
   if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${resolved.size}`);
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
   res.setHeader('Cache-Control', 'private, max-age=300');
-  res.setHeader('X-Telegram-Media-Transport', 'mtproto');
-  res.setHeader('X-MP4-Layout', index.mode);
   if (req.method === 'HEAD') return { ok: true };
 
   const abortController = new AbortController();
@@ -198,7 +213,8 @@ export default async function handler(req, res) {
     if (!access.ok) return json(res, access.status, { ok: false, error: access.error });
 
     const startedAt = Date.now();
-    if (String(req.query?.stream || '') !== '1') {
+    const prepareOnly = String(req.query?.prepare || '') === '1';
+    if (!prepareOnly && String(req.query?.stream || '') !== '1') {
       await getMtprotoClient();
       res.setHeader('Server-Timing', `mtproto-warmup;dur=${Date.now() - startedAt}`);
       res.statusCode = 204;
@@ -210,7 +226,7 @@ export default async function handler(req, res) {
     appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
     const streamed = await streamMtproto(req, res, resolved.row, resolved.media);
     if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
-    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - startedAt}`);
+    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
     if (!res.writableEnded) res.end();
   } catch (error) {
     console.error('[telegram-mtproto-warmup]', error?.message || error);
