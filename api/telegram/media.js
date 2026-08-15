@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import { once } from 'node:events';
+import { getCache } from '@vercel/functions';
 import { json } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { select } from '../../lib/supabase.js';
@@ -8,6 +9,7 @@ import { telegram } from '../../lib/telegram.js';
 import {
   buildFastStartIndex,
   cachedFastStartIndex,
+  isMp4ProbeRange,
   parseByteRange,
   streamIndexedRange
 } from '../../lib/mp4-faststart.js';
@@ -17,6 +19,7 @@ const BOT_FILE_PATH_TTL_MS = 50 * 60 * 1000;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const botFilePathCache = new Map();
+let mediaRuntimeCache;
 
 class GatewayError extends Error {
   constructor(code, status) {
@@ -36,16 +39,45 @@ function appendServerTiming(res, name, durationMs) {
   res.setHeader('Server-Timing', current ? `${current}, ${metric}` : metric);
 }
 
+function sharedMediaCache() {
+  if (!process.env.RUNTIME_CACHE_ENDPOINT || !process.env.RUNTIME_CACHE_HEADERS) return null;
+  if (!mediaRuntimeCache) mediaRuntimeCache = getCache({ namespace: 'tgcloner-media-v1' });
+  return mediaRuntimeCache;
+}
+
 async function botFilePath(fileId) {
   const cached = botFilePathCache.get(fileId);
-  if (cached && cached.expiresAt > Date.now()) return { path: cached.path, cached: true };
+  if (cached && cached.expiresAt > Date.now()) return { path: cached.path, source: 'memory' };
+  const shared = sharedMediaCache();
+  if (shared) {
+    try {
+      const value = await shared.get(`bot-file-path:${fileId}`);
+      if (value?.path && typeof value.path === 'string') {
+        botFilePathCache.set(fileId, { path: value.path, expiresAt: Date.now() + BOT_FILE_PATH_TTL_MS });
+        return { path: value.path, source: 'runtime' };
+      }
+    } catch (error) {
+      console.warn('[telegram-media-gateway] runtime file-path cache read failed', error?.message || error);
+    }
+  }
   const fileInfo = await telegram('getFile', { file_id: fileId });
   if (!fileInfo?.file_path) throw new GatewayError('telegram_get_file_failed', 502);
   botFilePathCache.set(fileId, {
     path: fileInfo.file_path,
     expiresAt: Date.now() + BOT_FILE_PATH_TTL_MS
   });
-  return { path: fileInfo.file_path, cached: false };
+  if (shared) {
+    try {
+      await shared.set(`bot-file-path:${fileId}`, { path: fileInfo.file_path }, {
+        ttl: Math.floor(BOT_FILE_PATH_TTL_MS / 1000),
+        tags: ['telegram-bot-file-path'],
+        name: 'telegram-bot-file-path'
+      });
+    } catch (error) {
+      console.warn('[telegram-media-gateway] runtime file-path cache write failed', error?.message || error);
+    }
+  }
+  return { path: fileInfo.file_path, source: 'telegram' };
 }
 
 function supabaseHeaders() {
@@ -166,7 +198,7 @@ async function streamViaBotApi(req, res, row, media) {
   if (!media.fileId) throw new GatewayError('media_file_id_missing', 409);
   const getFileStartedAt = Date.now();
   const fileInfo = await botFilePath(media.fileId);
-  appendServerTiming(res, fileInfo.cached ? 'bot-file-cache' : 'bot-get-file', Date.now() - getFileStartedAt);
+  appendServerTiming(res, `bot-file-${fileInfo.source}`, Date.now() - getFileStartedAt);
 
   const botToken = clean(requireEnv('TELEGRAM_BOT_TOKEN'));
   const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.path}`;
@@ -178,7 +210,10 @@ async function streamViaBotApi(req, res, row, media) {
   }
 
   let index = { mode: 'passthrough', size: media.size, reason: 'not_mp4' };
-  if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+  const probeOnly = isMp4(media) && isMp4ProbeRange(range);
+  if (probeOnly) {
+    index = { mode: 'probe-passthrough', size: media.size, reason: 'browser_probe' };
+  } else if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
     const indexStartedAt = Date.now();
     index = await cachedFastStartIndex(
       `bot:${row.id}:${media.fileId}:${media.size}`,
@@ -238,7 +273,7 @@ export default async function handler(req, res) {
       return res.end();
     }
     await streamViaBotApi(req, res, row, media);
-    console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
+    console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'media_gateway_failed';
     const status = Number(error?.status || 500);

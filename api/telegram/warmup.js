@@ -6,6 +6,7 @@ import { TABLES } from '../../lib/tables.js';
 import {
   buildFastStartIndex,
   cachedFastStartIndex,
+  isMp4ProbeRange,
   parseByteRange,
   streamIndexedRange
 } from '../../lib/mp4-faststart.js';
@@ -130,7 +131,10 @@ async function streamMtproto(req, res, row, media) {
   }
 
   let index = { mode: 'passthrough', size: resolved.size, reason: 'not_mp4' };
-  if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
+  const probeOnly = isMp4(media) && isMp4ProbeRange(range);
+  if (probeOnly) {
+    index = { mode: 'probe-passthrough', size: resolved.size, reason: 'browser_probe' };
+  } else if (req.method !== 'HEAD' && isMp4(media) && process.env.MP4_VIRTUAL_FASTSTART_ENABLED !== 'false') {
     const indexStartedAt = Date.now();
     const documentId = String(resolved.document?.id || row.id);
     index = await cachedFastStartIndex(
@@ -210,7 +214,7 @@ export default async function handler(req, res) {
     appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
     const streamed = await streamMtproto(req, res, resolved.row, resolved.media);
     if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
-    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} elapsed_ms=${Date.now() - startedAt}`);
+    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
     if (!res.writableEnded) res.end();
   } catch (error) {
     console.error('[telegram-mtproto-warmup]', error?.message || error);

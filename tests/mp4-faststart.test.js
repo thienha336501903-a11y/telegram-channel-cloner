@@ -4,6 +4,7 @@ import {
   buildFastStartIndex,
   cachedFastStartIndex,
   clearFastStartIndexCache,
+  isMp4ProbeRange,
   parseByteRange,
   streamIndexedRange,
   virtualRangeParts
@@ -109,6 +110,12 @@ test('parses browser byte ranges including suffix ranges', () => {
   assert.equal(parseByteRange('bytes=0-1,4-5', 100), null);
 });
 
+test('recognizes Safari two-byte media probes without indexing the MP4', () => {
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=0-1', 100)), true);
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=0-2', 100)), false);
+  assert.equal(isMp4ProbeRange(parseByteRange('bytes=1-2', 100)), false);
+});
+
 test('deduplicates concurrent index probes in one warm function instance', async () => {
   clearFastStartIndexCache();
   let builds = 0;
@@ -122,4 +129,30 @@ test('deduplicates concurrent index probes in one warm function instance', async
   ]);
   assert.equal(builds, 1);
   assert.equal(first, second);
+});
+
+test('reuses a serialized fast-start index across function instances', async () => {
+  clearFastStartIndexCache();
+  const values = new Map();
+  const sharedCache = {
+    get: async key => values.get(key) || null,
+    set: async (key, value) => values.set(key, value)
+  };
+  const source = fixture();
+  let builds = 0;
+  const build = async () => {
+    builds += 1;
+    return buildFastStartIndex({ size: source.file.length, readRange: reader(source.file) });
+  };
+
+  const first = await cachedFastStartIndex('shared-video', build, { sharedCache });
+  clearFastStartIndexCache();
+  const second = await cachedFastStartIndex('shared-video', build, { sharedCache });
+
+  assert.equal(builds, 1);
+  assert.equal(first.mode, 'virtual-faststart');
+  assert.equal(second.mode, 'virtual-faststart');
+  assert.equal(second.cacheSource, 'runtime');
+  assert.deepEqual(second.prefix, first.prefix);
+  assert.deepEqual(second.moov, first.moov);
 });
