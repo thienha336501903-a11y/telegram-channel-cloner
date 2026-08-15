@@ -78,6 +78,22 @@ test('maps ranges across cached header, moved moov and Telegram media', async ()
   assert.equal(parts[2].end, source.ftyp.length + source.mdat.length - 1);
 });
 
+test('coalesces ftyp and moov into one first response chunk', async () => {
+  const source = fixture();
+  const index = await buildFastStartIndex({ size: source.file.length, readRange: reader(source.file) });
+  const chunks = [];
+  await streamIndexedRange({
+    index,
+    start: 0,
+    end: source.file.length - 1,
+    streamOriginal: async (start, end, onChunk) => onChunk(source.file.subarray(start, end + 1)),
+    onChunk: async chunk => chunks.push(Buffer.from(chunk))
+  });
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0].length, source.ftyp.length + source.moov.length);
+  assert.equal(chunks[0].toString('ascii', source.ftyp.length + 4, source.ftyp.length + 8), 'moov');
+});
+
 test('leaves an already-fast-start file on the safe passthrough path', async () => {
   const source = fixture({ faststart: true });
   const index = await buildFastStartIndex({ size: source.file.length, readRange: reader(source.file) });
