@@ -7,6 +7,12 @@ import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { telegram } from '../../lib/telegram.js';
 import {
+  applyPlaybackCors,
+  clean,
+  ticketTokenFromRequest,
+  validateProtectedPlayback
+} from '../../lib/v4-playback-guard.js';
+import {
   buildFastStartIndex,
   cachedFastStartIndex,
   isMp4ProbeRange,
@@ -18,6 +24,7 @@ const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const BOT_FILE_PATH_TTL_MS = 50 * 60 * 1000;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const VIDEO_TYPES = new Set(['video', 'animation', 'video_note']);
 const botFilePathCache = new Map();
 let mediaRuntimeCache;
 
@@ -27,10 +34,6 @@ class GatewayError extends Error {
     this.code = code;
     this.status = status;
   }
-}
-
-function clean(value) {
-  return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
 }
 
 function appendServerTiming(res, name, durationMs) {
@@ -91,7 +94,7 @@ function supabaseHeaders() {
 async function loadTicket(token) {
   const base = clean(requireEnv('SUPABASE_URL')).replace(/\/$/, '');
   const qs = new URLSearchParams({
-    select: 'token,course_slug,source_id,message_id,email,expires_at,revoked_at',
+    select: 'token,course_slug,source_id,message_id,email,expires_at,revoked_at,purpose,playback_proof_hash,bound_ua_hash,bound_ip_hash',
     token: `eq.${token}`,
     limit: '1'
   });
@@ -194,7 +197,7 @@ async function writeChunk(res, chunk) {
   if (!res.write(chunk)) await once(res, 'drain');
 }
 
-async function streamViaBotApi(req, res, row, media) {
+async function streamViaBotApi(req, res, row, media, protectedPlayback = false) {
   if (!media.fileId) throw new GatewayError('media_file_id_missing', 409);
   const getFileStartedAt = Date.now();
   const fileInfo = await botFilePath(media.fileId);
@@ -240,8 +243,8 @@ async function streamViaBotApi(req, res, row, media) {
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', String(range.end - range.start + 1));
   if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${media.size}`);
-  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name || 'telegram-media')}`);
-  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('Content-Disposition', protectedPlayback ? 'inline' : `inline; filename*=UTF-8''${encodeURIComponent(media.name || 'telegram-media')}`);
+  res.setHeader('Cache-Control', protectedPlayback ? 'private, no-store' : 'private, max-age=300');
 
   if (req.method === 'HEAD') return res.end();
 
@@ -266,25 +269,41 @@ async function streamViaBotApi(req, res, row, media) {
 
 export default async function handler(req, res) {
   const requestStartedAt = Date.now();
+  const corsOkay = applyPlaybackCors(req, res);
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.method === 'OPTIONS') {
+    res.statusCode = corsOkay ? 204 : 403;
+    return res.end();
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return json(res, 405, { ok: false, error: 'method_not_allowed' });
   }
 
   try {
-    const ticketToken = String(req.query?.ticket || '').trim();
-    const { row, media } = await resolveTicketMedia(ticketToken);
+    const tokenInput = ticketTokenFromRequest(req);
+    const { ticket, row, media } = await resolveTicketMedia(tokenInput.token);
+    const purpose = String(ticket.purpose || 'legacy');
+    const isVideo = VIDEO_TYPES.has(row.message_type);
+    if (isVideo && purpose === 'feed') throw new GatewayError('playback_lease_required', 403);
+    if (isVideo && purpose === 'warmup') throw new GatewayError('warmup_ticket_not_streamable', 403);
+
+    const guard = validateProtectedPlayback(req, ticket, tokenInput.via);
+    if (!guard.ok) throw new GatewayError(guard.error, guard.status);
+    const protectedPlayback = Boolean(guard.protected);
+
     appendServerTiming(res, 'ticket-media', Date.now() - requestStartedAt);
     if (media.size > BOT_API_DOWNLOAD_LIMIT || !media.fileId) {
       res.statusCode = 307;
-      res.setHeader('Location', `/api/telegram/warmup?stream=1&ticket=${encodeURIComponent(ticketToken)}`);
+      res.setHeader('Location', protectedPlayback
+        ? '/api/telegram/warmup?stream=1'
+        : `/api/telegram/warmup?stream=1&ticket=${encodeURIComponent(tokenInput.token)}`);
       res.setHeader('X-Telegram-Media-Transport', 'mtproto-redirect');
-      console.info(`[telegram-media-gateway] transport=mtproto-redirect method=${req.method} size=${media.size} elapsed_ms=${Date.now() - requestStartedAt}`);
+      console.info(`[telegram-media-gateway] transport=mtproto-redirect protected=${protectedPlayback ? '1' : '0'} method=${req.method} size=${media.size} elapsed_ms=${Date.now() - requestStartedAt}`);
       return res.end();
     }
-    await streamViaBotApi(req, res, row, media);
-    console.info(`[telegram-media-gateway] transport=bot-api method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
+    await streamViaBotApi(req, res, row, media, protectedPlayback);
+    console.info(`[telegram-media-gateway] transport=bot-api protected=${protectedPlayback ? '1' : '0'} method=${req.method} size=${media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'media_gateway_failed';
     const status = Number(error?.status || 500);
