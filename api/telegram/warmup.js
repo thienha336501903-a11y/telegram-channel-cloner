@@ -4,6 +4,12 @@ import { requireEnv } from '../../lib/env.js';
 import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import {
+  applyPlaybackCors,
+  clean,
+  ticketTokenFromRequest,
+  validateProtectedPlayback
+} from '../../lib/v4-playback-guard.js';
+import {
   buildFastStartIndex,
   cachedFastStartIndex,
   isMp4ProbeRange,
@@ -20,10 +26,6 @@ import {
 const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function clean(value) {
-  return String(value || '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
-}
 
 function supabaseHeaders() {
   const key = clean(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -43,7 +45,7 @@ async function loadActiveTicket(token) {
   if (!UUID_RE.test(token)) return { ok: false, status: 400, error: 'invalid_ticket' };
   const base = clean(requireEnv('SUPABASE_URL')).replace(/\/$/, '');
   const qs = new URLSearchParams({
-    select: 'token,source_id,message_id,expires_at,revoked_at',
+    select: 'token,source_id,message_id,expires_at,revoked_at,purpose,playback_proof_hash,bound_ua_hash,bound_ip_hash',
     token: `eq.${token}`,
     limit: '1'
   });
@@ -103,7 +105,7 @@ async function readResolvedRange(resolved, start, end) {
   return Buffer.concat(chunks);
 }
 
-async function streamMtproto(req, res, row, media) {
+async function streamMtproto(req, res, row, media, protectedPlayback = false) {
   const sourceRows = await select(
     TABLES.sources,
     `select=id,chat_id&id=eq.${encodeURIComponent(row.source_id)}&limit=1`
@@ -165,8 +167,8 @@ async function streamMtproto(req, res, row, media) {
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', String(range.end - range.start + 1));
   if (range.partial) res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${resolved.size}`);
-  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
-  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('Content-Disposition', protectedPlayback ? 'inline' : `inline; filename*=UTF-8''${encodeURIComponent(media.name)}`);
+  res.setHeader('Cache-Control', protectedPlayback ? 'private, no-store' : 'private, max-age=300');
   if (req.method === 'HEAD') return { ok: true };
 
   const abortController = new AbortController();
@@ -201,20 +203,39 @@ async function streamMtproto(req, res, row, media) {
 }
 
 export default async function handler(req, res) {
+  const corsOkay = applyPlaybackCors(req, res);
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.method === 'OPTIONS') {
+    res.statusCode = corsOkay ? 204 : 403;
+    return res.end();
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return json(res, 405, { ok: false, error: 'method_not_allowed' });
   }
 
   try {
-    const ticketToken = String(req.query?.ticket || '').trim();
-    const access = await loadActiveTicket(ticketToken);
+    const tokenInput = ticketTokenFromRequest(req);
+    const access = await loadActiveTicket(tokenInput.token);
     if (!access.ok) return json(res, access.status, { ok: false, error: access.error });
 
     const startedAt = Date.now();
     const prepareOnly = String(req.query?.prepare || '') === '1';
-    if (!prepareOnly && String(req.query?.stream || '') !== '1') {
+    const streamOnly = String(req.query?.stream || '') === '1';
+    const purpose = String(access.ticket.purpose || 'legacy');
+
+    if (streamOnly && purpose === 'feed') {
+      return json(res, 403, { ok: false, error: 'playback_lease_required' });
+    }
+    if (streamOnly && purpose === 'warmup') {
+      return json(res, 403, { ok: false, error: 'warmup_ticket_not_streamable' });
+    }
+
+    const guard = validateProtectedPlayback(req, access.ticket, tokenInput.via);
+    if (!guard.ok) return json(res, guard.status, { ok: false, error: guard.error });
+    const protectedPlayback = Boolean(guard.protected);
+
+    if (!prepareOnly && !streamOnly) {
       await getMtprotoClient();
       res.setHeader('Server-Timing', `mtproto-warmup;dur=${Date.now() - startedAt}`);
       res.statusCode = 204;
@@ -224,9 +245,9 @@ export default async function handler(req, res) {
     const resolved = await resolveTicketMedia(access.ticket);
     if (!resolved.ok) return json(res, resolved.status, { ok: false, error: resolved.error });
     appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
-    const streamed = await streamMtproto(req, res, resolved.row, resolved.media);
+    const streamed = await streamMtproto(req, res, resolved.row, resolved.media, protectedPlayback);
     if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
-    console.info(`[telegram-mtproto-media] method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
+    console.info(`[telegram-mtproto-media] protected=${protectedPlayback ? '1' : '0'} method=${req.method} size=${resolved.media.size} range=${String(req.headers.range || 'none')} layout=${String(res.getHeader('X-MP4-Layout') || 'none')} index_cache=${String(res.getHeader('X-MP4-Index-Cache') || 'none')} server_timing=${String(res.getHeader('Server-Timing') || 'none')} elapsed_ms=${Date.now() - startedAt}`);
     if (!res.writableEnded) res.end();
   } catch (error) {
     console.error('[telegram-mtproto-warmup]', error?.message || error);
