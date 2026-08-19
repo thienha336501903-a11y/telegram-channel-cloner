@@ -1,3 +1,4 @@
+// Regression scope: history import commands stay local-only and never embed Telegram/API secrets.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
