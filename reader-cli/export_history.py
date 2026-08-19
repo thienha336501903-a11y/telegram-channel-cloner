@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """One-time/local Telegram history reader.
 
-Runs on the owner's computer, signs in as a dedicated Telegram account, reads the MASTER
-channel history, and uploads only normalized message metadata/text to the Cloner API.
+Runs on the owner's computer, signs in as a dedicated Telegram user account, reads one
+registered channel history, and uploads only normalized message metadata/text to the
+Cloner API. Registering/importing a source must not change the clone/mirror MASTER.
 The session file stays local and must never be committed.
 """
 import argparse
@@ -75,7 +76,8 @@ async def main():
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
         registered = post_json(args.cloner_url, "/api/reader/register-source", args.ingest_secret, {"chat_id": str(bot_chat_id), "title": title, "username": username, "private_link_id": private_link_id})
         source_id = registered["source"]["id"]
-        print(f"Source: {title} ({source_id})")
+        role = "MASTER mirror" if registered.get("mirror_master") else "nguồn V4 không MASTER"
+        print(f"Source: {title} ({source_id}) · {role}")
         pinned_ids = set()
         try:
             from telethon.tl.types import InputMessagesFilterPinned
@@ -94,7 +96,7 @@ async def main():
                 print(f"Indexed {count} messages; links found in batch: {result.get('internal_links', 0)}"); batch = []
         if batch: post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
         post_json(args.cloner_url, "/api/reader/complete", args.ingest_secret, {"source_id": source_id, "message_count": count})
-        print(f"Done. Indexed {count} messages.")
+        print(f"Done. Indexed {count} messages. MASTER mirror role was not changed.")
 
 
 if __name__ == "__main__": asyncio.run(main())
