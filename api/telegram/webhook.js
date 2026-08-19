@@ -1,11 +1,15 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { normalizeBotChannelPost, linksForNormalizedMessage } from '../../lib/source-message.js';
-import { getActiveSourceByChatId, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
+import { getSourceByChatId, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { insert } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
 async function enqueue(source, normalized, { edited = false, hasInternalLinks = false } = {}) {
+  // Only the current MASTER participates in the clone/mirror queue. Inactive
+  // registered sources are still indexed for V4 course playback, but must not
+  // unexpectedly mirror into generic destinations.
+  if (!source?.active) return;
   const destinations = (await listDestinations({ activeOnly: true })).filter((d) => d.source_id === source.id || !d.source_id);
   for (const destination of destinations) {
     const [job] = await insert(TABLES.cloneJobs, { source_id: source.id, destination_id: destination.id, mode: 'live_mirror', status: 'queued' });
@@ -26,7 +30,10 @@ export default async function handler(req, res) {
   const message = update.channel_post || update.edited_channel_post;
   if (!message) return json(res, 200, { ok: true, ignored: true });
 
-  const source = await getActiveSourceByChatId(message.chat?.id);
+  // V4 supports many course sources at the same time. Any Telegram channel that
+  // has already been registered in tgcloner_sources keeps receiving live index
+  // updates even after another source becomes the current MASTER.
+  const source = await getSourceByChatId(message.chat?.id);
   if (!source) return json(res, 200, { ok: true, ignored: true });
 
   const normalized = normalizeBotChannelPost(message);
@@ -49,5 +56,5 @@ export default async function handler(req, res) {
   });
   await recordInternalLinks(source.id, saved.id, links);
   await enqueue(source, normalized, { edited: Boolean(update.edited_channel_post), hasInternalLinks: links.length > 0 });
-  json(res, 200, { ok: true });
+  json(res, 200, { ok: true, indexed: true, mirrored: Boolean(source.active) });
 }
