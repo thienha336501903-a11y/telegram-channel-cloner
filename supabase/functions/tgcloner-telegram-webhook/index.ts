@@ -114,9 +114,11 @@ Deno.serve(async (req: Request) => {
 
     const chatId = String(message.chat?.id ?? '').trim();
     if (!chatId) return json(200, { ok: true, ignored: true });
+    // All registered sources keep receiving live index updates for V4 courses.
+    // Only source.active=true is treated as MASTER for clone/mirror jobs.
     const sources = await selectRows(
       'tgcloner_sources',
-      `select=*&active=eq.true&chat_id=eq.${encodeURIComponent(chatId)}&limit=1`
+      `select=*&chat_id=eq.${encodeURIComponent(chatId)}&limit=1`
     );
     const source = sources?.[0];
     if (!source) return json(200, { ok: true, ignored: true });
@@ -163,41 +165,43 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const destinations = await selectRows('tgcloner_destinations', 'select=*&active=eq.true&order=created_at.asc');
-    const targets = (destinations || []).filter(destination => destination.source_id === source.id || !destination.source_id);
-    const edited = Boolean(update.edited_channel_post);
+    if (source.active === true) {
+      const destinations = await selectRows('tgcloner_destinations', 'select=*&active=eq.true&order=created_at.asc');
+      const targets = (destinations || []).filter(destination => destination.source_id === source.id || !destination.source_id);
+      const edited = Boolean(update.edited_channel_post);
 
-    for (const destination of targets) {
-      const jobs = await insertRows('tgcloner_clone_jobs', {
-        source_id: source.id,
-        destination_id: destination.id,
-        mode: 'live_mirror',
-        status: 'queued'
-      });
-      const job = jobs?.[0];
-      if (!job?.id) throw new Error('clone_job_insert_returned_no_id');
-
-      if (!edited) {
-        await insertRows('tgcloner_clone_job_items', {
-          job_id: job.id,
-          source_message_id: normalized.source_message_id,
-          source_message_ids: [normalized.source_message_id],
-          phase: 'copy',
+      for (const destination of targets) {
+        const jobs = await insertRows('tgcloner_clone_jobs', {
+          source_id: source.id,
+          destination_id: destination.id,
+          mode: 'live_mirror',
           status: 'queued'
         });
-      }
-      if (edited || links.length > 0) {
-        await insertRows('tgcloner_clone_job_items', {
-          job_id: job.id,
-          source_message_id: normalized.source_message_id,
-          source_message_ids: [normalized.source_message_id],
-          phase: 'rewrite',
-          status: 'queued'
-        });
+        const job = jobs?.[0];
+        if (!job?.id) throw new Error('clone_job_insert_returned_no_id');
+
+        if (!edited) {
+          await insertRows('tgcloner_clone_job_items', {
+            job_id: job.id,
+            source_message_id: normalized.source_message_id,
+            source_message_ids: [normalized.source_message_id],
+            phase: 'copy',
+            status: 'queued'
+          });
+        }
+        if (edited || links.length > 0) {
+          await insertRows('tgcloner_clone_job_items', {
+            job_id: job.id,
+            source_message_id: normalized.source_message_id,
+            source_message_ids: [normalized.source_message_id],
+            phase: 'rewrite',
+            status: 'queued'
+          });
+        }
       }
     }
 
-    return json(200, { ok: true });
+    return json(200, { ok: true, indexed: true, mirrored: source.active === true });
   } catch (error) {
     console.error('[tgcloner-telegram-webhook]', error instanceof Error ? error.message : String(error));
     return json(500, { ok: false, error: 'internal_error' });
