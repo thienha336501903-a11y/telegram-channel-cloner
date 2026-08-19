@@ -3,6 +3,7 @@ import destinationsHandler from '../server/admin/destinations.js';
 import runTickHandler from '../server/admin/run-tick.js';
 import sourceHandler from '../server/admin/source.js';
 import summaryHandler from '../server/admin/summary.js';
+import v4SourceHandler from '../server/admin/v4-source.js';
 import verifyHandler from '../server/admin/verify.js';
 import webhookHandler from '../server/admin/webhook.js';
 import { json } from '../lib/http.js';
@@ -13,6 +14,7 @@ const handlers = {
   'run-tick': runTickHandler,
   source: sourceHandler,
   summary: summaryHandler,
+  'v4-source': v4SourceHandler,
   verify: verifyHandler,
   webhook: webhookHandler
 };
