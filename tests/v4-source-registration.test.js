@@ -1,3 +1,4 @@
+// Regression scope: V4 source registration must never switch the clone/mirror MASTER.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -30,4 +31,5 @@ test('Cloner admin exposes a separate V4 source form', () => {
   assert.match(page, /\/api\/admin\/v4-source/);
   assert.match(page, /Đăng ký nguồn V4/);
   assert.match(page, /Nguồn V4/);
+  assert.match(page, /mode.*v4-source/);
 });
