@@ -1,8 +1,14 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { normalizeBotChannelPost, linksForNormalizedMessage } from '../../lib/source-message.js';
-import { getSourceByChatId, listDestinations, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
-import { insert } from '../../lib/supabase.js';
+import {
+  getSourceByChatId,
+  getSourceMessage,
+  listDestinations,
+  recordInternalLinks,
+  upsertSourceMessage
+} from '../../lib/repository.js';
+import { insert, patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
 async function enqueue(source, normalized, { edited = false, hasInternalLinks = false } = {}) {
@@ -22,6 +28,36 @@ async function enqueue(source, normalized, { edited = false, hasInternalLinks = 
   }
 }
 
+function selfForwardOrigin(message) {
+  const origin = message?.forward_origin && typeof message.forward_origin === 'object'
+    ? message.forward_origin
+    : null;
+  const originChatId = origin?.chat?.id ?? message?.forward_from_chat?.id;
+  const originMessageId = origin?.message_id ?? message?.forward_from_message_id;
+  if (!originMessageId || String(originChatId ?? '') !== String(message?.chat?.id ?? '')) return null;
+  return Number(originMessageId) || null;
+}
+
+async function hydrateHistoricalSelfForward(source, message) {
+  const originalMessageId = selfForwardOrigin(message);
+  if (!originalMessageId) return false;
+
+  const original = await getSourceMessage(source.id, originalMessageId);
+  if (!original?.raw_message?.from_reader) return false;
+
+  await patch(TABLES.sourceMessages, `id=eq.${encodeURIComponent(original.id)}`, {
+    raw_message: {
+      ...message,
+      from_reader: true,
+      from_history_self_forward: true,
+      original_source_message_id: originalMessageId,
+      temp_forward_message_id: Number(message?.message_id || 0) || null
+    },
+    updated_at: new Date().toISOString()
+  }, { returning: false });
+  return true;
+}
+
 export default async function handler(req, res) {
   if (!method(req, res, ['POST'])) return;
   const secret = requireEnv('TELEGRAM_WEBHOOK_SECRET');
@@ -31,10 +67,18 @@ export default async function handler(req, res) {
   if (!message) return json(res, 200, { ok: true, ignored: true });
 
   // V4 supports many course sources at the same time. Any Telegram channel that
-  // has already been registered in tgcloner_sources keeps receiving live index
-  // updates even after another source becomes the current MASTER.
+  // has already been registered in tgcloner_sources keeps receiving/indexing live
+  // channel posts even after another source becomes the current MASTER.
   const source = await getSourceByChatId(message.chat?.id);
   if (!source) return json(res, 200, { ok: true, ignored: true });
+
+  // Historical media hydration temporarily forwards an old post back into the
+  // same channel so Bot API returns reusable file_id / thumbnail metadata. When
+  // that temporary post hits the webhook, enrich the already-indexed original
+  // row instead of creating a fifth/duplicate V4 lesson or mirror job.
+  if (!update.edited_channel_post && await hydrateHistoricalSelfForward(source, message)) {
+    return json(res, 200, { ok: true, ignored: true, hydrated_history: true });
+  }
 
   const normalized = normalizeBotChannelPost(message);
   const links = linksForNormalizedMessage(normalized, source);
