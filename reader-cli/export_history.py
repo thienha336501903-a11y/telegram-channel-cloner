@@ -87,7 +87,12 @@ async def main():
         batch = []; count = 0
         async for msg in client.iter_messages(entity, reverse=True):
             if not getattr(msg, "id", None): continue
-            raw = msg.raw_text or ""; has_media = bool(msg.media); text = raw if not has_media else None; caption = raw if has_media and raw else None
+            raw = msg.raw_text or ""; has_media = bool(msg.media)
+            # Telegram channel history includes service messages such as the
+            # channel-created event. They have no user-visible text or media
+            # and must not become empty V4 lesson items or inflate index counts.
+            if not raw and not has_media: continue
+            text = raw if not has_media else None; caption = raw if has_media and raw else None
             entities = [x for x in (entity_to_bot_api(e) for e in (msg.entities or [])) if x]
             item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": classify(msg), "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": {"from_reader": True}}
             batch.append(item); count += 1
