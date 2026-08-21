@@ -53,6 +53,11 @@ test('Windows helper stores reusable secrets with DPAPI and remains local-only',
   assert.match(gitignore, /reader-cli\/\.reader-windows-secrets\.json/);
 });
 
+test('Windows cmd binds -100 Telegram ids explicitly as the Channel parameter value', () => {
+  assert.match(cmd, /-Channel "%~1"/);
+  assert.doesNotMatch(cmd, /import_history_windows\.ps1" %\*/);
+});
+
 test('history reader resolves private chat ids and t.me/c links from local Telegram dialogs', () => {
   assert.match(reader, /def private_channel_id/);
   assert.match(reader, /-100\\d\+/);
