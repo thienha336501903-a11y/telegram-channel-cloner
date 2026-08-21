@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import timezone
 
@@ -52,6 +53,38 @@ def classify(message):
     return "other"
 
 
+def private_channel_id(value):
+    """Return the MTProto channel id from a Bot API -100 id or t.me/c link."""
+    raw = str(value or "").strip()
+    if re.fullmatch(r"-100\d+", raw):
+        return -1000000000000 - int(raw)
+    match = re.search(r"(?:https?://)?t\.me/c/(\d+)(?:/\d+)?", raw, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+async def resolve_channel(client, channel):
+    """Resolve public inputs directly and private ids by scanning dialogs safely."""
+    try:
+        return await client.get_entity(channel)
+    except Exception as direct_error:
+        wanted_id = private_channel_id(channel)
+        if wanted_id is None:
+            raise
+
+        async for dialog in client.iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            entity_id = getattr(entity, "id", None)
+            if entity_id is not None and int(entity_id) == int(wanted_id):
+                return entity
+
+        raise ValueError(
+            "Cannot resolve the private channel from this Telegram account. "
+            "Make sure the reader account is a member of the channel, then retry."
+        ) from direct_error
+
+
 def post_json(base_url, path, secret, payload):
     r = requests.post(base_url.rstrip("/") + path, headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), timeout=60)
     if not r.ok: raise RuntimeError(f"{path}: HTTP {r.status_code}: {r.text[:500]}")
@@ -62,7 +95,7 @@ async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"))
     p.add_argument("--api-hash", default=os.getenv("TELEGRAM_API_HASH"))
-    p.add_argument("--channel", required=True, help="@username, t.me link, or numeric channel id")
+    p.add_argument("--channel", required=True, help="@username, t.me link, t.me/c link, or numeric channel id")
     p.add_argument("--cloner-url", required=True, help="https://telegram-channel-cloner.vercel.app")
     p.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     p.add_argument("--session", default="telegram-cloner-reader")
@@ -71,7 +104,7 @@ async def main():
     if not args.api_id or not args.api_hash or not args.ingest_secret: p.error("api-id, api-hash and ingest-secret are required (flags or env vars)")
 
     async with TelegramClient(args.session, args.api_id, args.api_hash) as client:
-        entity = await client.get_entity(args.channel)
+        entity = await resolve_channel(client, args.channel)
         bot_chat_id = -1000000000000 - int(entity.id)
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
         registered = post_json(args.cloner_url, "/api/reader/register-source", args.ingest_secret, {"chat_id": str(bot_chat_id), "title": title, "username": username, "private_link_id": private_link_id})

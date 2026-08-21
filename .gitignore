@@ -14,6 +14,7 @@ node_modules/
 *.session-journal
 reader-cli/*.session*
 reader-cli/.venv/
+reader-cli/.reader-windows-secrets.json
 
 # Python / OS noise
 __pycache__/
