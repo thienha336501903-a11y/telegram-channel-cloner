@@ -6,6 +6,7 @@ import {
   getSourceMessage,
   listDestinations,
   recordInternalLinks,
+  syncSourceIndexedMessageCount,
   upsertSourceMessage
 } from '../../lib/repository.js';
 import { insert, patch } from '../../lib/supabase.js';
@@ -98,6 +99,7 @@ export default async function handler(req, res) {
     has_internal_links: links.length > 0,
     updated_at: new Date().toISOString()
   });
+  await syncSourceIndexedMessageCount(source.id);
   await recordInternalLinks(source.id, saved.id, links);
   await enqueue(source, normalized, { edited: Boolean(update.edited_channel_post), hasInternalLinks: links.length > 0 });
   json(res, 200, { ok: true, indexed: true, mirrored: Boolean(source.active) });
