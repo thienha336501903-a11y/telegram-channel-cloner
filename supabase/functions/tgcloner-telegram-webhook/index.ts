@@ -75,6 +75,24 @@ async function selectRows(table: string, query: string) {
   return await rest(`${table}?${query}`, { method: 'GET' }) as Record<string, unknown>[];
 }
 
+async function countRows(table: string, query = '') {
+  if (!SUPABASE_URL || !SERVICE_ROLE) throw new Error('Supabase function environment is incomplete');
+  const headers = new Headers();
+  headers.set('apikey', SERVICE_ROLE);
+  headers.set('authorization', `Bearer ${SERVICE_ROLE}`);
+  headers.set('prefer', 'count=exact');
+  const suffix = query ? `&${query}` : '';
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=id${suffix}`, {
+    method: 'HEAD',
+    headers
+  });
+  if (!response.ok) throw new Error(`Supabase REST ${response.status}`);
+  const contentRange = String(response.headers.get('content-range') || '');
+  const total = Number(contentRange.split('/')[1]);
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error('Supabase exact count missing');
+  return total;
+}
+
 async function insertRows(table: string, rows: unknown) {
   return await rest(table, {
     method: 'POST',
@@ -89,6 +107,46 @@ async function upsertRows(table: string, rows: unknown, onConflict: string) {
     headers: { prefer: 'resolution=merge-duplicates,return=representation' },
     body: JSON.stringify(rows)
   }) as Record<string, unknown>[];
+}
+
+async function patchRows(table: string, query: string, values: unknown) {
+  return await rest(`${table}?${query}`, {
+    method: 'PATCH',
+    headers: { prefer: 'return=representation' },
+    body: JSON.stringify(values)
+  }) as Record<string, unknown>[];
+}
+
+async function syncSourceIndexedMessageCount(sourceId: unknown) {
+  const value = String(sourceId || '').trim();
+  if (!value) return null;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const rows = await selectRows(
+      'tgcloner_sources',
+      `select=id,indexed_message_count&id=eq.${encodeURIComponent(value)}&limit=1`
+    );
+    const source = rows?.[0];
+    if (!source) return null;
+
+    const actual = await countRows('tgcloner_source_messages', `source_id=eq.${encodeURIComponent(value)}`);
+    const rawCurrent = source.indexed_message_count;
+    const currentNumber = Number(rawCurrent ?? 0);
+    const current = Number.isSafeInteger(currentNumber) && currentNumber >= 0 ? currentNumber : 0;
+    if (current === actual) return source;
+
+    const countFilter = rawCurrent === null || rawCurrent === undefined
+      ? 'indexed_message_count=is.null'
+      : `indexed_message_count=eq.${current}`;
+    const updated = await patchRows(
+      'tgcloner_sources',
+      `id=eq.${encodeURIComponent(value)}&${countFilter}`,
+      { indexed_message_count: actual, updated_at: new Date().toISOString() }
+    );
+    if (updated?.length) return updated[0];
+  }
+
+  throw new Error('source_index_count_concurrent_update');
 }
 
 Deno.serve(async (req: Request) => {
@@ -150,6 +208,7 @@ Deno.serve(async (req: Request) => {
     const savedRows = await upsertRows('tgcloner_source_messages', normalized, 'source_id,source_message_id');
     const saved = savedRows?.[0];
     if (!saved?.id) throw new Error('source_message_upsert_returned_no_id');
+    await syncSourceIndexedMessageCount(source.id);
 
     if (links.length) {
       await upsertRows(
