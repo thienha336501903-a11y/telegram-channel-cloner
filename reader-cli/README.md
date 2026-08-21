@@ -6,7 +6,27 @@ The reader signs in with a dedicated Telegram **user** account via MTProto, read
 
 Historical indexing is source-scoped: registering/importing a V4 source **must not change the clone/mirror MASTER**. If the selected source is already MASTER, that role is preserved; otherwise it remains a non-MASTER V4 source.
 
-## Run
+## Windows: one-command helper
+
+From the repository root, run:
+
+```powershell
+.\reader-cli\import-history.cmd "@your_channel"
+```
+
+You may also omit the channel and paste it when prompted. The helper accepts `@username`, public `t.me` links, private `t.me/c/...` links, and Bot API `-100...` chat IDs. For private inputs, the dedicated Telegram reader account must already be a member of that channel.
+
+On the first run, the helper reuses `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `READER_INGEST_SECRET` from the current environment when available; otherwise it prompts locally. It stores the reusable secret values in `reader-cli/.reader-windows-secrets.json` encrypted with Windows DPAPI for the current Windows user. That file and Telegram session files are ignored by Git.
+
+The helper also installs `reader-cli/requirements.txt` only when the Python dependencies are missing. When the local repository is clean and currently on `main`, it performs a safe `git pull --ff-only`; otherwise it skips the update rather than touching local work.
+
+To replace the encrypted local credentials later:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\reader-cli\import_history_windows.ps1 -ResetSecrets
+```
+
+## Manual / macOS / Linux run
 
 ```bash
 cd reader-cli
