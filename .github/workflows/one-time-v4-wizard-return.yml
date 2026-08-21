@@ -1,0 +1,43 @@
+name: Apply safe LMS Wizard return link
+
+on:
+  push:
+    branches:
+      - feat/v4-wizard-return-link-20260821
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v4-wizard-return-link-20260821
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Apply exact Cloner UI patch
+        run: node scripts/patch-v4-wizard-return-link.mjs
+      - name: Run tests and syntax checks
+        run: |
+          npm test
+          npm run check
+      - name: Remove one-time patch tooling
+        run: rm scripts/patch-v4-wizard-return-link.mjs .github/workflows/one-time-v4-wizard-return.yml
+      - name: Commit patched UI
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: add safe return from Cloner to LMS Wizard"
+          git push origin HEAD:feat/v4-wizard-return-link-20260821
