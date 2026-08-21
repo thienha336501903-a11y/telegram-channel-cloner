@@ -1,5 +1,6 @@
 import { json } from '../lib/http.js';
 import { select } from '../lib/supabase.js';
+import { telegram } from '../lib/telegram.js';
 
 export default async function handler(req, res) {
   let database = false;
@@ -9,6 +10,24 @@ export default async function handler(req, res) {
     database = true;
   } catch (err) {
     databaseError = err?.details?.code || err?.message || 'db_unavailable';
+  }
+
+  let bot = null;
+  let botError = null;
+  if (String(req.query?.bot || '') === '1') {
+    try {
+      const me = await telegram('getMe');
+      bot = {
+        id: Number(me?.id || 0) || null,
+        username: me?.username || null,
+        first_name: me?.first_name || null,
+        can_join_groups: Boolean(me?.can_join_groups),
+        can_read_all_group_messages: Boolean(me?.can_read_all_group_messages),
+        supports_inline_queries: Boolean(me?.supports_inline_queries)
+      };
+    } catch (err) {
+      botError = err?.message || 'telegram_get_me_failed';
+    }
   }
 
   json(res, database ? 200 : 503, {
@@ -28,6 +47,7 @@ export default async function handler(req, res) {
       readerIngest: Boolean(process.env.READER_INGEST_SECRET),
       adminAuth: Boolean(process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET),
       cron: Boolean(process.env.CRON_SECRET)
-    }
+    },
+    ...(String(req.query?.bot || '') === '1' ? { bot, botError } : {})
   });
 }
