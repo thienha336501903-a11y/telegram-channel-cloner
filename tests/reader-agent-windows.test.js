@@ -4,9 +4,10 @@ import fs from 'node:fs';
 const read = path => fs.readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 
 const agent = read('reader-cli/reader_agent.py');
-assert.match(agent, /\/api\/reader\/claim/);
-assert.match(agent, /\/api\/reader\/heartbeat/);
-assert.match(agent, /\/api\/reader\/finish-job/);
+assert.match(agent, /READER_CONTROL_PATH = "\/api\/reader\/complete"/);
+assert.match(agent, /control_path\("claim"\)/);
+assert.match(agent, /control_path\("heartbeat"\)/);
+assert.match(agent, /control_path\("finish-job"\)/);
 assert.match(agent, /export_history\.py/);
 assert.doesNotMatch(agent, /telegram-cloner-reader\.session/);
 
