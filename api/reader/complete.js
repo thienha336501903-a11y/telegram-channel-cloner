@@ -19,7 +19,7 @@ export default async function handler(req, res) {
   const body = await readJson(req, { maxBytes: 1_500_000 });
 
   if (action === 'claim') {
-    const job = await claimReaderJob(body.agent_id);
+    const job = await claimReaderJob(body.agent_id, body.capabilities);
     return json(res, 200, { ok: true, job });
   }
 
