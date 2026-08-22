@@ -20,6 +20,7 @@ import requests
 
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_HEARTBEAT_SECONDS = 30
+READER_CONTROL_PATH = "/api/reader/complete"
 
 
 def post_json(base_url, path, secret, payload, timeout=60):
@@ -32,6 +33,10 @@ def post_json(base_url, path, secret, payload, timeout=60):
     if not response.ok:
         raise RuntimeError(f"{path}: HTTP {response.status_code}: {response.text[:500]}")
     return response.json()
+
+
+def control_path(action):
+    return f"{READER_CONTROL_PATH}?action={action}"
 
 
 def default_agent_id():
@@ -53,7 +58,7 @@ def run_import(importer, channel, cloner_url, agent_id, job_id, secret, heartbea
         now = time.time()
         if now - last_heartbeat >= heartbeat_seconds:
             try:
-                post_json(cloner_url, "/api/reader/heartbeat", secret, {"job_id": job_id, "agent_id": agent_id}, timeout=20)
+                post_json(cloner_url, control_path("heartbeat"), secret, {"job_id": job_id, "agent_id": agent_id}, timeout=20)
             except Exception as exc:
                 print(f"Warning: heartbeat failed: {exc}", file=sys.stderr)
             last_heartbeat = now
@@ -86,7 +91,7 @@ def main():
 
     while True:
         try:
-            result = post_json(args.cloner_url, "/api/reader/claim", args.ingest_secret, {"agent_id": args.agent_id}, timeout=30)
+            result = post_json(cloner_url=args.cloner_url, path=control_path("claim"), secret=args.ingest_secret, payload={"agent_id": args.agent_id}, timeout=30)
             job = result.get("job")
             if not job:
                 if args.once:
@@ -104,7 +109,7 @@ def main():
             ok = code == 0
             error = None if ok else f"export_history_exit_{code}"
             try:
-                post_json(args.cloner_url, "/api/reader/finish-job", args.ingest_secret, {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error}, timeout=30)
+                post_json(args.cloner_url, control_path("finish-job"), args.ingest_secret, {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error}, timeout=30)
             except Exception as exc:
                 print(f"Warning: could not report job completion: {exc}", file=sys.stderr)
 
