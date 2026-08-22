@@ -14,17 +14,21 @@ assert.match(jobs, /claimed_by=eq\./);
 const v4Source = read('server/admin/v4-source.js');
 assert.match(v4Source, /queueReaderJob\(source\)/);
 assert.match(v4Source, /reader_job_created/);
+assert.match(v4Source, /history_import_required/);
+assert.match(v4Source, /if \(!source\?\.indexed_at\)/);
 assert.match(v4Source, /active: Boolean\(existing\?\.active\)/);
 
 const admin = read('api/admin.js');
 assert.match(admin, /'reader-job': readerJobHandler/);
 
-const claim = read('api/reader/claim.js');
-const heartbeat = read('api/reader/heartbeat.js');
-const finish = read('api/reader/finish-job.js');
-for (const source of [claim, heartbeat, finish]) {
-  assert.match(source, /READER_INGEST_SECRET/);
-}
+const control = read('api/reader/complete.js');
+assert.match(control, /READER_INGEST_SECRET/);
+assert.match(control, /action === 'claim'/);
+assert.match(control, /action === 'heartbeat'/);
+assert.match(control, /action === 'finish-job'/);
+assert.match(control, /claimReaderJob/);
+assert.match(control, /heartbeatReaderJob/);
+assert.match(control, /finishReaderJob/);
 
 const migration = read('sql/005_reader_agent_queue.sql');
 assert.match(migration, /create table if not exists public\.tgcloner_reader_jobs/);
