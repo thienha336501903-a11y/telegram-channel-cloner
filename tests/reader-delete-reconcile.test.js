@@ -26,6 +26,8 @@ assert.match(local, /telegram-cloner-reader/);
 assert.doesNotMatch(local, /session.*post_json/i);
 
 const agent = read('reader-cli/reader_agent.py');
+assert.match(agent, /READER_CAPABILITIES = \["reconcile_v1"\]/);
+assert.match(agent, /"capabilities": READER_CAPABILITIES/);
 assert.match(agent, /reconcile_history\.py/);
 assert.match(agent, /job_type == "reconcile"/);
 assert.match(agent, /"--source-id"/);
