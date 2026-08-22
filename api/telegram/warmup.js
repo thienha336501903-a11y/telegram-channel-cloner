@@ -18,10 +18,10 @@ import {
 } from '../../lib/mp4-faststart.js';
 import {
   getMtprotoClient,
-  resolveMtprotoDocument,
   resetMtprotoClient,
   streamResolvedMtprotoRange
 } from '../../lib/mtproto-media.js';
+import { resolveMtprotoHistoricalMedia } from '../../lib/mtproto-history-media.js';
 
 const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const TICKET_TABLE = 'lms_v4_media_tickets';
@@ -64,6 +64,16 @@ async function loadActiveTicket(token) {
 
 function pickMedia(raw, messageType) {
   const value = raw && typeof raw === 'object' ? raw : {};
+  if (messageType === 'photo' && Array.isArray(value.photo) && value.photo.length) {
+    const item = value.photo[value.photo.length - 1] || {};
+    return {
+      fileId: String(item.file_id || ''),
+      size: Number(item.file_size || 0),
+      mimeType: 'image/jpeg',
+      name: 'telegram-photo.jpg',
+      mtproto: Boolean(item.mtproto)
+    };
+  }
   const key = messageType === 'video_note' ? 'video_note' : messageType;
   const item = value[key] && typeof value[key] === 'object' ? value[key] : null;
   if (!item) return null;
@@ -71,7 +81,8 @@ function pickMedia(raw, messageType) {
     fileId: String(item.file_id || ''),
     size: Number(item.file_size || 0),
     mimeType: String(item.mime_type || 'application/octet-stream'),
-    name: String(item.file_name || `telegram-${messageType}`)
+    name: String(item.file_name || `telegram-${messageType}`),
+    mtproto: Boolean(item.mtproto)
   };
 }
 
@@ -116,7 +127,7 @@ async function streamMtproto(req, res, row, media, protectedPlayback = false) {
   const resolveStartedAt = Date.now();
   let resolved;
   try {
-    resolved = await resolveMtprotoDocument({
+    resolved = await resolveMtprotoHistoricalMedia({
       chatId: source.chat_id,
       messageId: row.source_message_id
     });
@@ -125,6 +136,10 @@ async function streamMtproto(req, res, row, media, protectedPlayback = false) {
     throw error;
   }
   appendServerTiming(res, 'mtproto-resolve', Date.now() - resolveStartedAt);
+
+  media.size = Number(resolved.size || media.size || 0);
+  media.mimeType = String(resolved.mimeType || media.mimeType || 'application/octet-stream');
+  media.name = String(resolved.name || media.name || 'telegram-media');
 
   const range = parseByteRange(req.headers.range, resolved.size);
   if (!range) {
@@ -143,9 +158,9 @@ async function streamMtproto(req, res, row, media, protectedPlayback = false) {
     (req.method !== 'HEAD' || prepareOnly)
   ) {
     const indexStartedAt = Date.now();
-    const documentId = String(resolved.document?.id || row.id);
+    const mediaId = String(resolved.document?.id || resolved.photo?.id || row.id);
     index = await cachedFastStartIndex(
-      `mtproto:${row.id}:${documentId}:${resolved.size}`,
+      `mtproto:${row.id}:${mediaId}:${resolved.size}`,
       () => buildFastStartIndex({
         size: resolved.size,
         readRange: (start, end) => readResolvedRange(resolved, start, end)
