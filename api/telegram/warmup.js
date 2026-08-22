@@ -26,6 +26,7 @@ import { resolveMtprotoHistoricalMedia } from '../../lib/mtproto-history-media.j
 const BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const VIDEO_TYPES = new Set(['video', 'animation', 'video_note']);
 
 function supabaseHeaders() {
   const key = clean(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -239,9 +240,6 @@ export default async function handler(req, res) {
     const streamOnly = String(req.query?.stream || '') === '1';
     const purpose = String(access.ticket.purpose || 'legacy');
 
-    if (streamOnly && purpose === 'feed') {
-      return json(res, 403, { ok: false, error: 'playback_lease_required' });
-    }
     if (streamOnly && purpose === 'warmup') {
       return json(res, 403, { ok: false, error: 'warmup_ticket_not_streamable' });
     }
@@ -259,6 +257,9 @@ export default async function handler(req, res) {
 
     const resolved = await resolveTicketMedia(access.ticket);
     if (!resolved.ok) return json(res, resolved.status, { ok: false, error: resolved.error });
+    if (streamOnly && purpose === 'feed' && VIDEO_TYPES.has(resolved.row.message_type)) {
+      return json(res, 403, { ok: false, error: 'playback_lease_required' });
+    }
     appendServerTiming(res, 'ticket-media', Date.now() - startedAt);
     const streamed = await streamMtproto(req, res, resolved.row, resolved.media, protectedPlayback);
     if (!streamed.ok) return json(res, streamed.status, { ok: false, error: streamed.error });
