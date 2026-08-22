@@ -21,6 +21,7 @@ import requests
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_HEARTBEAT_SECONDS = 30
 READER_CONTROL_PATH = "/api/reader/complete"
+READER_CAPABILITIES = ["reconcile_v1"]
 
 
 def post_json(base_url, path, secret, payload, timeout=60):
@@ -92,7 +93,13 @@ def main():
 
     while True:
         try:
-            result = post_json(args.cloner_url, control_path("claim"), args.ingest_secret, {"agent_id": args.agent_id}, timeout=30)
+            result = post_json(
+                args.cloner_url,
+                control_path("claim"),
+                args.ingest_secret,
+                {"agent_id": args.agent_id, "capabilities": READER_CAPABILITIES},
+                timeout=30,
+            )
             job = result.get("job")
             if not job:
                 if args.once:
