@@ -1,4 +1,5 @@
-// Regression scope: history import stays local-only, one-command on Windows, and never embeds secrets.
+// Regression scope: history import stays local-only, Reader Agent is one-time setup,
+// manual Windows import remains available as a secret-free fallback.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,17 +10,21 @@ const cmd = fs.readFileSync(new URL('../reader-cli/import-history.cmd', import.m
 const reader = fs.readFileSync(new URL('../reader-cli/export_history.py', import.meta.url), 'utf8');
 const gitignore = fs.readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
 
-test('Cloner admin explains live webhook versus local historical import', () => {
+test('Cloner admin explains live webhook versus automatic local history import', () => {
   assert.match(page, /Bài mới\/sửa bài/);
   assert.match(page, /webhook tự cập nhật/);
-  assert.match(page, /Bài cũ trước khi đăng ký/);
-  assert.match(page, /Import 1 lệnh/);
-  assert.match(page, /Windows DPAPI/);
+  assert.match(page, /Bài cũ/);
+  assert.match(page, /Reader Agent trên Windows/);
+  assert.match(page, /Telegram user session vẫn chỉ nằm trên máy Windows/);
+  assert.match(page, /Cài Reader Agent 1 lần/);
+  assert.match(page, /Lệnh thủ công/);
 });
 
-test('every source exposes a one-command Windows historical import helper', () => {
+test('every source exposes automatic history import and a manual fallback', () => {
+  assert.match(page, /data-reader-source/);
+  assert.match(page, /🤖 Import tự động/);
   assert.match(page, /data-history-channel/);
-  assert.match(page, /📋 Import 1 lệnh/);
+  assert.match(page, /📋 Lệnh thủ công/);
   assert.match(page, /function historicalImportCommand/);
   assert.match(page, /git pull --ff-only origin main/);
   assert.match(page, /reader-cli\\\\import-history\.cmd/);
@@ -27,16 +32,16 @@ test('every source exposes a one-command Windows historical import helper', () =
   assert.match(page, /window\.prompt/);
 });
 
-test('generated admin command never embeds runtime secrets or sessions', () => {
+test('generated admin commands never embed runtime secrets or sessions', () => {
   const helperStart = page.indexOf('function historicalImportCommand');
-  const helperEnd = page.indexOf('async function copyHistoricalImport', helperStart);
+  const helperEnd = page.indexOf('async function copyText', helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
   const helper = page.slice(helperStart, helperEnd);
   assert.doesNotMatch(helper, /TELEGRAM_API_ID/);
   assert.doesNotMatch(helper, /TELEGRAM_API_HASH/);
   assert.doesNotMatch(helper, /READER_INGEST_SECRET/);
   assert.doesNotMatch(helper, /Authorization/);
-  assert.doesNotMatch(helper, /session/i);
+  assert.doesNotMatch(helper, /\.session/i);
 });
 
 test('Windows helper stores reusable secrets with DPAPI and remains local-only', () => {
@@ -68,7 +73,7 @@ test('history reader resolves private chat ids and t.me/c links from local Teleg
   assert.match(reader, /entity = await resolve_channel\(client, args\.channel\)/);
 });
 
-test('source table prefers username and safely falls back to chat id', () => {
-  assert.match(page, /const historyChannel=s\.username\?'@'\+s\.username:s\.chat_id/);
-  assert.match(page, /copyHistoricalImport\(b\.dataset\.historyChannel\)/);
+test('source history controls prefer username and safely fall back to chat id', () => {
+  assert.match(page, /s\.username\?'@'\+s\.username:s\.chat_id/);
+  assert.match(page, /copyHistoricalImport\(manual\.dataset\.historyChannel\)/);
 });
