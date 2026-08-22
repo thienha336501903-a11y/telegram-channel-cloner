@@ -53,6 +53,96 @@ def classify(message):
     return "other"
 
 
+def size_bytes(item):
+    if item is None:
+        return 0
+    direct = int(getattr(item, "size", 0) or 0)
+    if direct > 0:
+        return direct
+    progressive = [int(value or 0) for value in (getattr(item, "sizes", None) or [])]
+    return max(progressive) if progressive else 0
+
+
+def largest_size(items):
+    candidates = []
+    for item in items or []:
+        item_type = str(getattr(item, "type", "") or "")
+        if not item_type:
+            continue
+        width = int(getattr(item, "w", 0) or 0)
+        height = int(getattr(item, "h", 0) or 0)
+        byte_size = size_bytes(item)
+        candidates.append((width * height, byte_size, item))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return candidates[0][2]
+
+
+def document_file_name(document, message_type):
+    for attribute in getattr(document, "attributes", None) or []:
+        file_name = str(getattr(attribute, "file_name", "") or "").strip()
+        if file_name:
+            return file_name
+    mime = str(getattr(document, "mime_type", "") or "").lower()
+    if mime == "video/mp4":
+        return "telegram-video.mp4"
+    if message_type == "video":
+        return "telegram-video"
+    if message_type == "audio":
+        return "telegram-audio"
+    return "telegram-document"
+
+
+def mtproto_size_metadata(item):
+    if item is None:
+        return None
+    return {
+        "file_id": "",
+        "file_size": size_bytes(item),
+        "width": int(getattr(item, "w", 0) or 0),
+        "height": int(getattr(item, "h", 0) or 0),
+        "type": str(getattr(item, "type", "") or ""),
+        "mtproto": True,
+    }
+
+
+def reader_raw_message(message, message_type):
+    """Return non-secret historical media descriptors safe to upload to Cloner.
+
+    These fields intentionally contain no Telegram user session/API hash/OTP data and
+    no Bot API file_id. The server resolves the actual media later by source chat id
+    plus source message id using its own bot MTProto session.
+    """
+    raw_message = {"from_reader": True}
+    media = getattr(message, "media", None)
+
+    if message_type == "photo":
+        photo = getattr(media, "photo", None) or getattr(message, "photo", None)
+        chosen = largest_size(getattr(photo, "sizes", None) or [])
+        descriptor = mtproto_size_metadata(chosen)
+        if descriptor:
+            raw_message["photo"] = [descriptor]
+        return raw_message
+
+    document = getattr(media, "document", None) or getattr(message, "document", None)
+    if document is None or message_type not in ("video", "audio", "document"):
+        return raw_message
+
+    item = {
+        "file_id": "",
+        "file_size": int(getattr(document, "size", 0) or 0),
+        "mime_type": str(getattr(document, "mime_type", "") or "application/octet-stream"),
+        "file_name": document_file_name(document, message_type),
+        "mtproto": True,
+    }
+    thumbnail = mtproto_size_metadata(largest_size(getattr(document, "thumbs", None) or []))
+    if thumbnail:
+        item["thumbnail"] = thumbnail
+    raw_message[message_type] = item
+    return raw_message
+
+
 def private_channel_id(value):
     """Return the MTProto channel id from a Bot API -100 id or t.me/c link."""
     raw = str(value or "").strip()
@@ -127,7 +217,8 @@ async def main():
             if not raw and not has_media: continue
             text = raw if not has_media else None; caption = raw if has_media and raw else None
             entities = [x for x in (entity_to_bot_api(e) for e in (msg.entities or [])) if x]
-            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": classify(msg), "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": {"from_reader": True}}
+            message_type = classify(msg)
+            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": message_type, "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": reader_raw_message(msg, message_type)}
             batch.append(item); count += 1
             if len(batch) >= args.batch_size:
                 result = post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
