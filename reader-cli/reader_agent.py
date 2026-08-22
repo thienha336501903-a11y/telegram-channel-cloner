@@ -13,6 +13,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -62,6 +63,18 @@ def run_worker(command, cwd, cloner_url, agent_id, job_id, secret, heartbeat_sec
         if code is not None:
             return code
         time.sleep(2)
+
+
+def read_worker_result(path):
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        return result if isinstance(result, dict) else {}
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+
+
+def nonnegative_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def main():
@@ -132,23 +145,32 @@ def main():
                 command = [sys.executable, str(importer), "--channel", channel, "--cloner-url", args.cloner_url]
 
             print(f"Claimed {job_type} job {job_id}: {channel}")
-            code = run_worker(
-                command,
-                repo_root,
-                args.cloner_url,
-                args.agent_id,
-                job_id,
-                args.ingest_secret,
-                max(10, args.heartbeat_seconds),
-            )
+            with tempfile.TemporaryDirectory(prefix="tgcloner-reader-") as result_dir:
+                result_file = Path(result_dir) / "result.json"
+                if job_type == "reconcile":
+                    command.extend(["--result-file", str(result_file)])
+                code = run_worker(
+                    command,
+                    repo_root,
+                    args.cloner_url,
+                    args.agent_id,
+                    job_id,
+                    args.ingest_secret,
+                    max(10, args.heartbeat_seconds),
+                )
+                worker_result = read_worker_result(result_file)
             ok = code == 0
             error = None if ok else f"{job_type}_exit_{code}"
+            completion = {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error}
+            deleted_count = nonnegative_int(worker_result.get("deleted_count"))
+            if ok and job_type == "reconcile" and deleted_count is not None:
+                completion["deleted_count"] = deleted_count
             try:
                 post_json(
                     args.cloner_url,
                     control_path("finish-job"),
                     args.ingest_secret,
-                    {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error},
+                    completion,
                     timeout=30,
                 )
             except Exception as exc:

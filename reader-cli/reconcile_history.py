@@ -8,7 +8,9 @@ arriving during the scan are never removed.
 """
 import argparse
 import asyncio
+import json
 import os
+from pathlib import Path
 
 from telethon import TelegramClient
 
@@ -24,6 +26,7 @@ async def main():
     parser.add_argument("--cloner-url", required=True)
     parser.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     parser.add_argument("--session", default="telegram-cloner-reader")
+    parser.add_argument("--result-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if not args.api_id or not args.api_hash or not args.ingest_secret:
@@ -76,6 +79,11 @@ async def main():
         f"observed {len(set(present_ids))} ids <= {upper_bound}; "
         f"deleted {deleted}; indexed count {indexed}."
     )
+    if args.result_file:
+        Path(args.result_file).write_text(
+            json.dumps({"deleted_count": deleted, "indexed_message_count": indexed}),
+            encoding="utf-8",
+        )
     return deleted
 
 

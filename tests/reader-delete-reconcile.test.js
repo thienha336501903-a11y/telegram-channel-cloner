@@ -23,6 +23,8 @@ assert.match(local, /telegram_chat_id != expected_chat_id/);
 assert.match(local, /message_id > upper_bound/);
 assert.match(local, /present_message_ids/);
 assert.match(local, /telegram-cloner-reader/);
+assert.match(local, /--result-file/);
+assert.match(local, /"deleted_count": deleted/);
 assert.doesNotMatch(local, /session.*post_json/i);
 
 const agent = read('reader-cli/reader_agent.py');
@@ -32,5 +34,8 @@ assert.match(agent, /reconcile_history\.py/);
 assert.match(agent, /job_type == "reconcile"/);
 assert.match(agent, /"--source-id"/);
 assert.match(agent, /Claimed \{job_type\} job/);
+assert.match(agent, /TemporaryDirectory\(prefix="tgcloner-reader-"\)/);
+assert.match(agent, /command\.extend\(\["--result-file", str\(result_file\)\]\)/);
+assert.match(agent, /completion\["deleted_count"\] = deleted_count/);
 
 console.log('Reader deletion reconcile safety checks passed');
