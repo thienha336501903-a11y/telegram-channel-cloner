@@ -2,8 +2,8 @@
 """Background Telegram history reader agent.
 
 The Telegram user session stays on this PC. The agent polls the Cloner for queued
-history-import jobs, launches the existing local export_history.py importer, and
-reports job status back to the server.
+history-import and reconcile jobs, launches the matching local worker, and reports
+job status back to the server.
 
 No Telegram session, OTP, 2FA password, API hash, or reader secret is uploaded.
 """
@@ -45,13 +45,9 @@ def default_agent_id():
     return f"{host}:{user}"[:160]
 
 
-def run_import(importer, channel, cloner_url, agent_id, job_id, secret, heartbeat_seconds):
+def run_worker(command, cwd, cloner_url, agent_id, job_id, secret, heartbeat_seconds):
     env = os.environ.copy()
-    proc = subprocess.Popen(
-        [sys.executable, str(importer), "--channel", channel, "--cloner-url", cloner_url],
-        cwd=str(importer.parent.parent),
-        env=env,
-    )
+    proc = subprocess.Popen(command, cwd=str(cwd), env=env)
     last_heartbeat = 0.0
     while True:
         code = proc.poll()
@@ -82,9 +78,14 @@ def main():
     if not os.getenv("TELEGRAM_API_ID") or not os.getenv("TELEGRAM_API_HASH"):
         parser.error("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
 
-    importer = Path(__file__).resolve().parent / "export_history.py"
+    worker_dir = Path(__file__).resolve().parent
+    repo_root = worker_dir.parent
+    importer = worker_dir / "export_history.py"
+    reconciler = worker_dir / "reconcile_history.py"
     if not importer.exists():
         raise SystemExit(f"Missing importer: {importer}")
+    if not reconciler.exists():
+        raise SystemExit(f"Missing reconciler: {reconciler}")
 
     print(f"Reader Agent online: {args.agent_id}")
     print("Telegram session remains local on this PC.")
@@ -100,16 +101,49 @@ def main():
                 continue
 
             job_id = str(job.get("id") or "")
+            source_id = str(job.get("source_id") or "")
             channel = str(job.get("channel_ref") or "").strip()
+            job_type = str(job.get("job_type") or "import").strip().lower()
             if not job_id or not channel:
                 raise RuntimeError("Reader job missing id/channel_ref")
 
-            print(f"Claimed job {job_id}: {channel}")
-            code = run_import(importer, channel, args.cloner_url, args.agent_id, job_id, args.ingest_secret, max(10, args.heartbeat_seconds))
+            if job_type == "reconcile":
+                if not source_id:
+                    raise RuntimeError("Reconcile job missing source_id")
+                command = [
+                    sys.executable,
+                    str(reconciler),
+                    "--source-id",
+                    source_id,
+                    "--channel",
+                    channel,
+                    "--cloner-url",
+                    args.cloner_url,
+                ]
+            else:
+                job_type = "import"
+                command = [sys.executable, str(importer), "--channel", channel, "--cloner-url", args.cloner_url]
+
+            print(f"Claimed {job_type} job {job_id}: {channel}")
+            code = run_worker(
+                command,
+                repo_root,
+                args.cloner_url,
+                args.agent_id,
+                job_id,
+                args.ingest_secret,
+                max(10, args.heartbeat_seconds),
+            )
             ok = code == 0
-            error = None if ok else f"export_history_exit_{code}"
+            error = None if ok else f"{job_type}_exit_{code}"
             try:
-                post_json(args.cloner_url, control_path("finish-job"), args.ingest_secret, {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error}, timeout=30)
+                post_json(
+                    args.cloner_url,
+                    control_path("finish-job"),
+                    args.ingest_secret,
+                    {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error},
+                    timeout=30,
+                )
             except Exception as exc:
                 print(f"Warning: could not report job completion: {exc}", file=sys.stderr)
 
