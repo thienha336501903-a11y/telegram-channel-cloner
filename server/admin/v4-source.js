@@ -28,12 +28,14 @@ export default async function handler(req, res) {
 
   let readerJob = null;
   let readerJobCreated = false;
-  try {
-    const queued = await queueReaderJob(source);
-    readerJob = queued.job;
-    readerJobCreated = queued.created;
-  } catch (error) {
-    console.warn('[v4-source] reader job queue failed', error?.message || error);
+  if (!source?.indexed_at) {
+    try {
+      const queued = await queueReaderJob(source);
+      readerJob = queued.job;
+      readerJobCreated = queued.created;
+    } catch (error) {
+      console.warn('[v4-source] reader job queue failed', error?.message || error);
+    }
   }
 
   json(res, 200, {
@@ -41,6 +43,7 @@ export default async function handler(req, res) {
     source,
     already_registered: Boolean(existing),
     mirror_master: Boolean(existing?.active),
+    history_import_required: !source?.indexed_at,
     reader_job: readerJob,
     reader_job_created: readerJobCreated
   });
