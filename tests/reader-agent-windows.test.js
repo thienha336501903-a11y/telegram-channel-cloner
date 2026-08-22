@@ -30,5 +30,10 @@ assert.match(installer, /phone \/ OTP \/ 2FA/);
 assert.match(installer, /schtasks\.exe/);
 assert.match(installer, /\/SC ONLOGON/);
 assert.match(installer, /\/RL LIMITED/);
+assert.match(installer, /HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run/);
+assert.match(installer, /Set-ItemProperty -Path \$runKeyPath -Name \$TaskName -Value \$taskCommand/);
+assert.match(installer, /Administrator rights are not required/);
+assert.match(installer, /Start-Process -FilePath "powershell\.exe"/);
+assert.doesNotMatch(installer, /RunOnce/);
 
 console.log('Reader Agent Windows safety checks passed');
