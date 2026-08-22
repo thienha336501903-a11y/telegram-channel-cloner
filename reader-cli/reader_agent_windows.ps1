@@ -2,7 +2,8 @@ param(
   [string]$ClonerUrl = "https://telegram-channel-cloner.vercel.app",
   [switch]$Once,
   [switch]$NoUpdate,
-  [switch]$ResetSecrets
+  [switch]$ResetSecrets,
+  [switch]$SetupOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -12,6 +13,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SecretsPath = Join-Path $PSScriptRoot ".reader-windows-secrets.json"
 $RequirementsPath = Join-Path $PSScriptRoot "requirements.txt"
 $AgentPath = Join-Path $PSScriptRoot "reader_agent.py"
+$AuthorizePath = Join-Path $PSScriptRoot "authorize_session.py"
 
 function Get-PythonRunner {
   $python = Get-Command python -ErrorAction SilentlyContinue
@@ -108,6 +110,15 @@ try {
     & $pythonExe @pythonPrefix -m pip install -r $RequirementsPath
     if ($LASTEXITCODE -ne 0) { throw "Could not install reader dependencies." }
   }
+
+  if ($SetupOnly) {
+    Write-Host "Authorizing the local Telegram reader session. Telegram may ask for phone, OTP and 2FA once."
+    & $pythonExe @pythonPrefix $AuthorizePath
+    if ($LASTEXITCODE -ne 0) { throw "Telegram reader session authorization failed." }
+    Write-Host "Reader Agent local setup is ready."
+    return
+  }
+
   $argsList = @($pythonPrefix) + @($AgentPath, "--cloner-url", $ClonerUrl)
   if ($Once) { $argsList += "--once" }
   Write-Host "Starting Reader Agent. Keep this window open, or install it as a startup task."
