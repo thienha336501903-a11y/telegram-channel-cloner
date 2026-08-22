@@ -1,5 +1,6 @@
 import cloneHandler from '../server/admin/clone.js';
 import destinationsHandler from '../server/admin/destinations.js';
+import readerJobHandler from '../server/admin/reader-job.js';
 import runTickHandler from '../server/admin/run-tick.js';
 import sourceHandler from '../server/admin/source.js';
 import summaryHandler from '../server/admin/summary.js';
@@ -11,6 +12,7 @@ import { json } from '../lib/http.js';
 const handlers = {
   clone: cloneHandler,
   destinations: destinationsHandler,
+  'reader-job': readerJobHandler,
   'run-tick': runTickHandler,
   source: sourceHandler,
   summary: summaryHandler,
