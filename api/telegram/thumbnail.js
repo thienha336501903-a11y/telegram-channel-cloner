@@ -4,6 +4,8 @@ import { requireEnv } from '../../lib/env.js';
 import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { telegram } from '../../lib/telegram.js';
+import { resetMtprotoClient, streamResolvedMtprotoRange } from '../../lib/mtproto-media.js';
+import { resolveMtprotoHistoricalThumbnail } from '../../lib/mtproto-history-media.js';
 
 const TICKET_TABLE = 'lms_v4_media_tickets';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -106,13 +108,22 @@ function pickThumbnail(raw, messageType) {
   const item = value[key] && typeof value[key] === 'object' ? value[key] : null;
   if (!item) return null;
   const thumb = item.thumbnail || item.thumb || null;
-  if (!thumb?.file_id) return null;
+  if (!thumb || (!thumb.file_id && !thumb.mtproto)) return null;
   return {
-    fileId: String(thumb.file_id),
+    fileId: String(thumb.file_id || ''),
+    mtproto: Boolean(thumb.mtproto),
     size: Number(thumb.file_size || 0),
     mimeType: 'image/jpeg',
     name: 'telegram-thumbnail.jpg'
   };
+}
+
+function thumbnailCacheId(thumbnail) {
+  if (thumbnail.fileId) return `bot:${thumbnail.fileId}`;
+  if (thumbnail.mtproto && thumbnail.sourceId && thumbnail.sourceMessageId) {
+    return `mtproto:${thumbnail.sourceId}:${thumbnail.sourceMessageId}`;
+  }
+  return '';
 }
 
 async function resolveThumbnailMetadata(ticket) {
@@ -121,7 +132,7 @@ async function resolveThumbnailMetadata(ticket) {
   if (shared) {
     try {
       const cached = await shared.get(cacheKey);
-      if (cached?.fileId) return { ...cached, metaCache: 'runtime' };
+      if (cached?.fileId || cached?.mtproto) return { ...cached, metaCache: 'runtime' };
     } catch (error) {
       console.warn('[telegram-thumbnail-gateway] runtime metadata cache read failed', error?.message || error);
     }
@@ -129,16 +140,31 @@ async function resolveThumbnailMetadata(ticket) {
 
   const rows = await select(
     TABLES.sourceMessages,
-    `select=id,source_id,message_type,raw_message&id=eq.${encodeURIComponent(ticket.message_id)}&source_id=eq.${encodeURIComponent(ticket.source_id)}&limit=1`
+    `select=id,source_id,source_message_id,message_type,raw_message&id=eq.${encodeURIComponent(ticket.message_id)}&source_id=eq.${encodeURIComponent(ticket.source_id)}&limit=1`
   );
   const row = Array.isArray(rows) ? rows[0] || null : null;
   if (!row) throw new GatewayError('media_not_found', 404);
   const thumbnail = pickThumbnail(row.raw_message, row.message_type);
   if (!thumbnail) throw new GatewayError('thumbnail_not_found', 404);
 
+  let enriched = {
+    ...thumbnail,
+    sourceId: row.source_id,
+    sourceMessageId: row.source_message_id
+  };
+  if (thumbnail.mtproto) {
+    const sourceRows = await select(
+      TABLES.sources,
+      `select=id,chat_id&id=eq.${encodeURIComponent(row.source_id)}&limit=1`
+    );
+    const source = Array.isArray(sourceRows) ? sourceRows[0] || null : null;
+    if (!source?.chat_id) throw new GatewayError('telegram_source_missing', 404);
+    enriched = { ...enriched, chatId: String(source.chat_id) };
+  }
+
   if (shared) {
     try {
-      await shared.set(cacheKey, thumbnail, {
+      await shared.set(cacheKey, enriched, {
         ttl: THUMBNAIL_CACHE_TTL_SECONDS,
         tags: ['telegram-thumbnail-meta'],
         name: 'telegram-thumbnail-meta'
@@ -147,7 +173,7 @@ async function resolveThumbnailMetadata(ticket) {
       console.warn('[telegram-thumbnail-gateway] runtime metadata cache write failed', error?.message || error);
     }
   }
-  return { ...thumbnail, metaCache: 'database' };
+  return { ...enriched, metaCache: 'database' };
 }
 
 async function resolveTicketThumbnail(ticketToken) {
@@ -169,7 +195,9 @@ function setThumbnailHeaders(res, thumbnail, contentType, length, cacheSource) {
 }
 
 async function loadCachedThumbnailBytes(thumbnail) {
-  const memory = thumbnailMemoryCache.get(thumbnail.fileId);
+  const id = thumbnailCacheId(thumbnail);
+  if (!id) return null;
+  const memory = thumbnailMemoryCache.get(id);
   if (memory && memory.expiresAt > Date.now()) {
     return { bytes: memory.bytes, contentType: memory.contentType, source: 'memory' };
   }
@@ -177,11 +205,11 @@ async function loadCachedThumbnailBytes(thumbnail) {
   const shared = sharedThumbnailCache();
   if (!shared) return null;
   try {
-    const cached = await shared.get(`thumbnail-bytes:${thumbnail.fileId}`);
+    const cached = await shared.get(`thumbnail-bytes:${id}`);
     if (!cached?.bodyBase64) return null;
     const bytes = Buffer.from(cached.bodyBase64, 'base64');
     const contentType = String(cached.contentType || thumbnail.mimeType);
-    thumbnailMemoryCache.set(thumbnail.fileId, {
+    thumbnailMemoryCache.set(id, {
       bytes,
       contentType,
       expiresAt: Date.now() + THUMBNAIL_CACHE_TTL_SECONDS * 1000
@@ -194,7 +222,9 @@ async function loadCachedThumbnailBytes(thumbnail) {
 }
 
 async function saveThumbnailBytes(thumbnail, bytes, contentType) {
-  thumbnailMemoryCache.set(thumbnail.fileId, {
+  const id = thumbnailCacheId(thumbnail);
+  if (!id) return;
+  thumbnailMemoryCache.set(id, {
     bytes,
     contentType,
     expiresAt: Date.now() + THUMBNAIL_CACHE_TTL_SECONDS * 1000
@@ -204,7 +234,7 @@ async function saveThumbnailBytes(thumbnail, bytes, contentType) {
   const shared = sharedThumbnailCache();
   if (!shared) return;
   try {
-    await shared.set(`thumbnail-bytes:${thumbnail.fileId}`, {
+    await shared.set(`thumbnail-bytes:${id}`, {
       bodyBase64: bytes.toString('base64'),
       contentType
     }, {
@@ -217,6 +247,44 @@ async function saveThumbnailBytes(thumbnail, bytes, contentType) {
   }
 }
 
+async function streamMtprotoThumbnail(req, res, thumbnail) {
+  const resolveStartedAt = Date.now();
+  let resolved;
+  try {
+    resolved = await resolveMtprotoHistoricalThumbnail({
+      chatId: thumbnail.chatId,
+      messageId: thumbnail.sourceMessageId
+    });
+  } catch (error) {
+    resetMtprotoClient();
+    throw error;
+  }
+  appendServerTiming(res, 'thumbnail-mtproto-resolve', Date.now() - resolveStartedAt);
+  thumbnail.size = Number(resolved.size || thumbnail.size || 0);
+
+  if (req.method === 'HEAD') {
+    setThumbnailHeaders(res, thumbnail, resolved.mimeType, resolved.size, 'mtproto-head');
+    return res.end();
+  }
+
+  const chunks = [];
+  try {
+    await streamResolvedMtprotoRange({
+      resolved,
+      start: 0,
+      end: resolved.size - 1,
+      onChunk: async chunk => chunks.push(Buffer.from(chunk))
+    });
+  } catch (error) {
+    resetMtprotoClient();
+    throw error;
+  }
+  const bytes = Buffer.concat(chunks);
+  await saveThumbnailBytes(thumbnail, bytes, resolved.mimeType);
+  setThumbnailHeaders(res, thumbnail, resolved.mimeType, bytes.length, 'mtproto');
+  return res.end(bytes);
+}
+
 async function streamThumbnail(req, res, thumbnail) {
   const cacheStartedAt = Date.now();
   const cached = await loadCachedThumbnailBytes(thumbnail);
@@ -226,6 +294,8 @@ async function streamThumbnail(req, res, thumbnail) {
     if (req.method === 'HEAD') return res.end();
     return res.end(cached.bytes);
   }
+
+  if (thumbnail.mtproto) return streamMtprotoThumbnail(req, res, thumbnail);
 
   const getFileStartedAt = Date.now();
   const fileInfo = await botFilePath(thumbnail.fileId);
@@ -266,7 +336,7 @@ export default async function handler(req, res) {
     const thumbnail = await resolveTicketThumbnail(ticketToken);
     appendServerTiming(res, `ticket-thumbnail-${thumbnail.metaCache || 'unknown'}`, Date.now() - requestStartedAt);
     await streamThumbnail(req, res, thumbnail);
-    console.info(`[telegram-thumbnail-gateway] method=${req.method} meta_cache=${thumbnail.metaCache || 'unknown'} byte_cache=${String(res.getHeader('X-Thumbnail-Cache') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
+    console.info(`[telegram-thumbnail-gateway] method=${req.method} transport=${thumbnail.mtproto ? 'mtproto' : 'bot-api'} meta_cache=${thumbnail.metaCache || 'unknown'} byte_cache=${String(res.getHeader('X-Thumbnail-Cache') || 'none')} elapsed_ms=${Date.now() - requestStartedAt}`);
   } catch (error) {
     const code = error?.code || 'thumbnail_gateway_failed';
     const status = Number(error?.status || 500);
