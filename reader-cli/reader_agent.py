@@ -91,7 +91,7 @@ def main():
 
     while True:
         try:
-            result = post_json(cloner_url=args.cloner_url, path=control_path("claim"), secret=args.ingest_secret, payload={"agent_id": args.agent_id}, timeout=30)
+            result = post_json(args.cloner_url, control_path("claim"), args.ingest_secret, {"agent_id": args.agent_id}, timeout=30)
             job = result.get("job")
             if not job:
                 if args.once:
