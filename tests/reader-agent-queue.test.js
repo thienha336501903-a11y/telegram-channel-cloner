@@ -15,6 +15,9 @@ assert.match(jobs, /jobType:\s*'reconcile'/);
 assert.match(jobs, /READER_RECONCILE_INTERVAL_HOURS/);
 assert.match(jobs, /last_reconciled_at\.lt/);
 assert.match(jobs, /queueNextDueReconcileJob/);
+assert.match(jobs, /RECONCILE_CAPABILITY = 'reconcile_v1'/);
+assert.match(jobs, /job_type=eq\.import/);
+assert.match(jobs, /if \(!canReconcile\) return null/);
 
 const v4Source = read('server/admin/v4-source.js');
 assert.match(v4Source, /queueReaderJob\(source\)/);
@@ -37,7 +40,7 @@ assert.match(control, /action === 'heartbeat'/);
 assert.match(control, /action === 'finish-job'/);
 assert.match(control, /action === 'reconcile-plan'/);
 assert.match(control, /action === 'reconcile'/);
-assert.match(control, /claimReaderJob/);
+assert.match(control, /claimReaderJob\(body\.agent_id, body\.capabilities\)/);
 assert.match(control, /heartbeatReaderJob/);
 assert.match(control, /finishReaderJob/);
 
