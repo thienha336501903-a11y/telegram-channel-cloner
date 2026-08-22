@@ -8,6 +8,8 @@ assert.match(agent, /READER_CONTROL_PATH = "\/api\/reader\/complete"/);
 assert.match(agent, /control_path\("claim"\)/);
 assert.match(agent, /control_path\("heartbeat"\)/);
 assert.match(agent, /control_path\("finish-job"\)/);
+assert.match(agent, /post_json\(args\.cloner_url, control_path\("claim"\)/);
+assert.doesNotMatch(agent, /post_json\(cloner_url=args\.cloner_url/);
 assert.match(agent, /export_history\.py/);
 assert.doesNotMatch(agent, /telegram-cloner-reader\.session/);
 
