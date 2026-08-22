@@ -1,6 +1,7 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { extractInternalLinks } from '../../lib/links.js';
+import { hasUsableReaderMtprotoMedia } from '../../lib/reader-media.js';
 import { recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { patch, select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
@@ -85,6 +86,7 @@ export default async function handler(req, res) {
   let linkCount = 0;
   let hydrationAttempts = 0;
   let hydratedCount = 0;
+  let mtprotoPreserved = 0;
   const hydrationErrors = [];
   for (const m of body.messages) {
     const textLinks = extractInternalLinks(m.text, source).map((x) => ({ ...x, location: 'text' }));
@@ -108,7 +110,12 @@ export default async function handler(req, res) {
     });
     await recordInternalLinks(source.id, saved.id, links);
 
-    if (m.raw_message?.from_reader) {
+    if (hasUsableReaderMtprotoMedia(m)) {
+      // Reader descriptors are sufficient for the MTProto media/thumbnail
+      // gateways. Preserve them instead of self-forwarding every historical
+      // media item through Bot API inside one Vercel request.
+      mtprotoPreserved += 1;
+    } else if (m.raw_message?.from_reader) {
       const hydration = await hydrateHistoricalMedia(source, saved, m);
       if (hydration.attempted) hydrationAttempts += 1;
       if (hydration.hydrated) hydratedCount += 1;
@@ -124,6 +131,7 @@ export default async function handler(req, res) {
     internal_links: linkCount,
     hydration_attempts: hydrationAttempts,
     hydrated: hydratedCount,
+    mtproto_preserved: mtprotoPreserved,
     hydration_errors: hydrationErrors
   });
 }
