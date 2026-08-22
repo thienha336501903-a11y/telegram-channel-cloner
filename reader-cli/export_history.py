@@ -189,7 +189,9 @@ async def main():
     p.add_argument("--cloner-url", required=True, help="https://telegram-channel-cloner.vercel.app")
     p.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     p.add_argument("--session", default="telegram-cloner-reader")
-    p.add_argument("--batch-size", type=int, default=50)
+    # Keep each serverless request comfortably below the runtime deadline even
+    # when a future/legacy message still requires Bot API hydration.
+    p.add_argument("--batch-size", type=int, default=20)
     args = p.parse_args()
     if not args.api_id or not args.api_hash or not args.ingest_secret: p.error("api-id, api-hash and ingest-secret are required (flags or env vars)")
 
