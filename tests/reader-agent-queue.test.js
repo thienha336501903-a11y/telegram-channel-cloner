@@ -34,13 +34,15 @@ assert.match(adminReaderJob, /body\.job_type === 'reconcile'/);
 assert.match(adminReaderJob, /queueReaderJob\(source, \{ jobType \}\)/);
 
 const control = read('api/reader/complete.js');
-assert.match(control, /READER_INGEST_SECRET/);
+assert.match(control, /authenticateReaderRequest/);
+assert.match(control, /managedAgentId/);
 assert.match(control, /action === 'claim'/);
 assert.match(control, /action === 'heartbeat'/);
 assert.match(control, /action === 'finish-job'/);
 assert.match(control, /action === 'reconcile-plan'/);
 assert.match(control, /action === 'reconcile'/);
-assert.match(control, /claimReaderJob\(body\.agent_id, body\.capabilities\)/);
+assert.match(control, /claimReaderJob\(/);
+assert.match(control, /profileIds: readyProfileIds/);
 assert.match(control, /heartbeatReaderJob/);
 assert.match(control, /finishReaderJob/);
 
