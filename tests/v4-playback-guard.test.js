@@ -65,6 +65,8 @@ function ticket(overrides = {}) {
 test('accepts canonical and Vercel preview LMS origins', () => {
   assert.equal(isAllowedV4Origin(ORIGIN), true);
   assert.equal(isAllowedV4Origin('https://yeunauan-lms-v4-test-abc123-owner-projects.vercel.app'), true);
+  assert.equal(isAllowedV4Origin('https://yeunauan-lms-git-f01d1d-thienha100022653824678-stacks-projects.vercel.app'), true);
+  assert.equal(isAllowedV4Origin('https://yeunauan-lms-git-f01d1d-attacker-projects.vercel.app'), false);
   assert.equal(isAllowedV4Origin('https://example.com'), false);
 });
 
