@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
-root = Path(SPECPATH).parent.parent
+root = Path(SPECPATH).parent
 analysis = Analysis(
     [str(root / "reader-manager" / "reader_manager_gui.py")],
     pathex=[str(root / "reader-manager"), str(root / "reader-cli")],
