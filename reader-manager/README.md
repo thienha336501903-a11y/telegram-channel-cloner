@@ -7,7 +7,8 @@ Telegram Reader với LMS V4 mà không cần cài Python, Git hoặc chạy l�
 
 1. Trong Commerce Admin, mở **Quản lý Reader** và tạo mã ghép máy.
 2. Cài và mở `YeuNauAnReaderSetup.exe` trên máy Windows.
-3. Nhập mã một lần trong ứng dụng.
+3. Sao chép toàn bộ mã kết nối một lần từ V4 Admin và dán vào ứng dụng. Mã tự
+   chọn đúng Cloner Preview hoặc Production; người dùng không phải nhập URL.
 4. Bấm **Thêm tài khoản Telegram**, nhập số điện thoại, OTP và mật khẩu 2FA
    (nếu có) ngay trên máy.
 5. Chờ trạng thái **Sẵn sàng**, sau đó chọn **Tự động** hoặc một Reader cụ thể
@@ -29,3 +30,7 @@ dạng artifact `YeuNauAnReaderSetup`. Build cục bộ dành cho maintainer:
 
 Không đưa API hash, token ghép máy, agent token hoặc Telegram session vào source,
 artifact, log hay biến môi trường của Commerce.
+
+Ứng dụng chỉ chấp nhận máy chủ Production chính thức hoặc Preview thuộc đúng
+Vercel team của hệ thống. Mã mang URL lạ, HTTP, thông tin đăng nhập, đường dẫn,
+query hoặc fragment sẽ bị từ chối trước khi ứng dụng gửi request.

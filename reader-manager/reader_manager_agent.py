@@ -14,9 +14,9 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from reader_manager_storage import load_config, save_config
+from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.0.0"
-DEFAULT_CLONER_URL = "https://telegram-channel-cloner.vercel.app"
+APP_VERSION = "1.1.0"
 CONTROL_PATH = "/api/reader/complete"
 CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1"]
 

@@ -11,7 +11,9 @@ const admin = read('api/admin.js');
 const storage = read('reader-manager/reader_manager_storage.py');
 const gui = read('reader-manager/reader_manager_gui.py');
 const agent = read('reader-manager/reader_manager_agent.py');
+const pairing = read('reader-manager/reader_manager_pairing.py');
 const installer = read('reader-manager/installer.iss');
+const readerAdmin = read('server/admin/reader-manager.js');
 
 test('Reader Manager migration is additive, source-scoped and RLS protected', () => {
   assert.match(migration, /create table if not exists public\.tgcloner_reader_agents/);
@@ -65,6 +67,18 @@ test('Reader Manager provides basic-user setup without Python or command entry',
   assert.match(installer, /PrivilegesRequired=lowest/);
   assert.match(installer, /YeuNauAnReaderImport\.exe/);
   assert.match(agent, /reader_source_access_denied/);
+});
+
+test('one-field pairing selects only the trusted Production or team Preview server', () => {
+  assert.match(readerAdmin, /connection_code:\s*`YNA1\|/);
+  assert.match(readerAdmin, /VERCEL_ENV === 'preview'/);
+  assert.match(readerAdmin, /VERCEL_BRANCH_URL \|\| process\.env\.VERCEL_URL/);
+  assert.match(pairing, /def parse_pairing_package/);
+  assert.match(pairing, /PRODUCTION_CLONER_HOST/);
+  assert.match(pairing, /PREVIEW_CLONER_HOST\.fullmatch/);
+  assert.match(pairing, /parsed\.scheme != "https"/);
+  assert.match(pairing, /reader_server_not_trusted/);
+  assert.match(gui, /parse_pairing_package\(pairing_value\)/);
 });
 
 test('Reader workers receive decrypted sessions only through the local process environment', () => {

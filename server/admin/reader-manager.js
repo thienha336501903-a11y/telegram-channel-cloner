@@ -6,6 +6,16 @@ import {
   listReaderManagerState
 } from '../../lib/reader-manager.js';
 
+function readerManagerPublicUrl() {
+  const explicit = String(process.env.READER_MANAGER_PUBLIC_URL || '').trim().replace(/\/$/, '');
+  if (explicit) return explicit;
+  const previewHost = process.env.VERCEL_BRANCH_URL || process.env.VERCEL_URL;
+  if (process.env.VERCEL_ENV === 'preview' && previewHost) {
+    return `https://${String(previewHost).trim().replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
+  }
+  return 'https://telegram-channel-cloner.vercel.app';
+}
+
 export default async function handler(req, res) {
   if (!isAuthenticated(req) && !isInternalSyncAuthorized(req)) {
     return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -25,7 +35,8 @@ export default async function handler(req, res) {
           id: result.pairing.id,
           display_name: result.pairing.display_name,
           expires_at: result.pairing.expires_at,
-          code: result.code
+          code: result.code,
+          connection_code: `YNA1|${readerManagerPublicUrl()}|${result.code}`
         }
       });
     }

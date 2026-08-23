@@ -9,7 +9,8 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 
-from reader_manager_agent import APP_VERSION, DEFAULT_CLONER_URL, api, start_background
+from reader_manager_agent import APP_VERSION, api, start_background
+from reader_manager_pairing import parse_pairing_package
 from reader_manager_storage import load_config, save_config
 
 
@@ -73,13 +74,14 @@ class ReaderManagerApp(tk.Tk):
         self.status_text.set("Đã ghép với V4 Admin · Reader Agent đang hoạt động" if paired else "Nhập mã ghép nối lấy từ V4 Admin")
 
     def pair_machine(self):
-        code = self.pairing.get().strip()
-        if not code:
+        pairing_value = self.pairing.get().strip()
+        if not pairing_value:
             messagebox.showwarning("Thiếu mã", "Hãy nhập mã ghép nối từ V4 Admin.")
             return
         try:
+            cloner_url, code = parse_pairing_package(pairing_value)
             response = requests.post(
-                DEFAULT_CLONER_URL + "/api/reader/complete?action=pair",
+                cloner_url + "/api/reader/complete?action=pair",
                 json={"code": code, "platform": f"Windows {platform.release()}", "app_version": APP_VERSION},
                 timeout=30,
             )
@@ -89,7 +91,7 @@ class ReaderManagerApp(tk.Tk):
             config = self.config_value()
             config.update({
                 "version": 1,
-                "cloner_url": DEFAULT_CLONER_URL,
+                "cloner_url": cloner_url,
                 "agent": data["agent"],
                 "agent_token": data["agent_token"],
                 "telegram_api_id": str(data["telegram_api_id"]),
@@ -182,6 +184,8 @@ class ReaderManagerApp(tk.Tk):
         mapping = {
             "pairing_expired": "Mã kết nối đã hết hạn. Hãy tạo mã mới trong V4 Admin.",
             "pairing_invalid_or_used": "Mã không đúng hoặc đã được sử dụng.",
+            "pairing_package_invalid": "Mã kết nối không đúng định dạng. Hãy sao chép lại toàn bộ mã từ V4 Admin.",
+            "reader_server_not_trusted": "Mã kết nối không thuộc máy chủ V4 được tin cậy.",
             "PhoneCodeInvalidError": "Mã Telegram không chính xác.",
             "PasswordHashInvalidError": "Mật khẩu xác minh hai bước không chính xác.",
         }
