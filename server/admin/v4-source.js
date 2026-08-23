@@ -1,4 +1,4 @@
-import { isAuthenticated } from '../../lib/auth.js';
+import { isAuthenticated, isInternalSyncAuthorized } from '../../lib/auth.js';
 import { json, method, readJson } from '../../lib/http.js';
 import { botApiChatIdToPrivateLinkId, normalizeTelegramSourceRef } from '../../lib/links.js';
 import { queueReaderJob } from '../../lib/reader-jobs.js';
@@ -6,7 +6,9 @@ import { getSourceByChatId, upsertSource } from '../../lib/repository.js';
 import { getChat } from '../../lib/telegram.js';
 
 export default async function handler(req, res) {
-  if (!isAuthenticated(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+  if (!isAuthenticated(req) && !isInternalSyncAuthorized(req)) {
+    return json(res, 401, { ok: false, error: 'unauthorized' });
+  }
   if (!method(req, res, ['POST'])) return;
 
   const body = await readJson(req);
