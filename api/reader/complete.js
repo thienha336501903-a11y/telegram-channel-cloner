@@ -117,7 +117,9 @@ export default async function handler(req, res) {
       jobId: body.job_id,
       agentId: managedAgentId || body.agent_id,
       progressCurrent: body.progress_current,
-      progressTotal: body.progress_total
+      progressTotal: body.progress_total,
+      progressStage: body.progress_stage,
+      progressDetail: body.progress_detail
     });
     if (!job) return json(res, 409, { ok: false, error: 'reader_job_not_owned' });
     return json(res, 200, { ok: true, job });
