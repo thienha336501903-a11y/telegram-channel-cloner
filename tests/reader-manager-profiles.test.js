@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const read = path => fs.readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const migration = read('sql/007_reader_manager_profiles.sql');
+const telemetryMigration = read('sql/008_reader_job_telemetry.sql');
 const manager = read('lib/reader-manager.js');
 const jobs = read('lib/reader-jobs.js');
 const control = read('api/reader/complete.js');
@@ -48,6 +49,26 @@ test('jobs are targeted to profiles and managed agents cannot claim another assi
   assert.match(jobs, /assigned_reader_profile_id\.in/);
   assert.match(jobs, /reader_job_already_assigned/);
   assert.match(jobs, /progress_current/);
+});
+
+test('Reader telemetry migration is additive and stores no Telegram secrets', () => {
+  assert.match(telemetryMigration, /add column if not exists progress_stage text/);
+  assert.match(telemetryMigration, /add column if not exists progress_detail text/);
+  assert.doesNotMatch(telemetryMigration, /api_hash|session_string|telegram_session/i);
+  assert.doesNotMatch(telemetryMigration, /drop table|delete from|truncate/i);
+});
+
+test('Reader Manager exposes bounded operational metrics and staged progress', () => {
+  const importer = read('reader-cli/export_history.py');
+  assert.match(manager, /usage_today/);
+  assert.match(manager, /recent_sources/);
+  assert.match(manager, /active_job/);
+  assert.match(manager, /limit=200/);
+  assert.match(jobs, /PROGRESS_STAGES/);
+  assert.match(agent, /progress_stage_v1/);
+  assert.match(agent, /progress_stage/);
+  assert.match(importer, /get_messages\(entity, limit=0\)/);
+  assert.match(importer, /write_progress\(args\.progress_file, count, history_total\)/);
 });
 
 test('Windows Reader Manager protects all local configuration with DPAPI', () => {

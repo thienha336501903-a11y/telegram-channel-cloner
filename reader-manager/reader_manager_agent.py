@@ -16,9 +16,9 @@ from telethon.sessions import StringSession
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 CONTROL_PATH = "/api/reader/complete"
-CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1"]
+CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1"]
 
 
 def api(config, action, payload=None, timeout=45):
@@ -66,6 +66,14 @@ def progress_value(path):
         return None, None
 
 
+def worker_result(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def run_job(config, job, stop_event, status_callback=None):
     profile_id = str(job.get("claimed_reader_profile_id") or job.get("assigned_reader_profile_id") or "")
     profile = profile_for(config, profile_id)
@@ -76,6 +84,11 @@ def run_job(config, job, stop_event, status_callback=None):
     job_id = str(job.get("id") or "")
     job_type = str(job.get("job_type") or "import")
     api(config, "profile-status", {"profile_id": profile_id, "status": "busy"})
+    api(config, "job-progress", {
+        "job_id": job_id,
+        "progress_stage": "verifying_source",
+        "progress_detail": f"Đang kiểm tra quyền truy cập {channel}",
+    })
     if status_callback:
         status_callback(f"Đang kiểm tra quyền truy cập {channel}")
     try:
@@ -105,27 +118,47 @@ def run_job(config, job, stop_event, status_callback=None):
         else:
             command = worker_command("export_history.py") + ["--channel", channel,
                        "--cloner-url", config.get("cloner_url", DEFAULT_CLONER_URL), "--progress-file", str(progress_file)]
+        stage = "reconciling" if job_type == "reconcile" else "reading_history"
+        api(config, "job-progress", {
+            "job_id": job_id,
+            "progress_stage": stage,
+            "progress_detail": "Đang đối chiếu lịch sử kênh" if job_type == "reconcile" else "Đang đọc lịch sử kênh Telegram",
+        })
         process = subprocess.Popen(command, env=env)
         last_heartbeat = 0
         while process.poll() is None:
             if stop_event.is_set():
                 process.terminate()
                 break
-            if time.time() - last_heartbeat >= 20:
+            if time.time() - last_heartbeat >= 10:
                 current, total = progress_value(progress_file)
                 payload = {"job_id": job_id}
                 if current is not None:
                     payload["progress_current"] = current
                 if isinstance(total, int):
                     payload["progress_total"] = total
+                payload["progress_stage"] = stage
+                payload["progress_detail"] = (
+                    f"Đã xử lý {current} bài" if current is not None else
+                    ("Đang đối chiếu lịch sử kênh" if job_type == "reconcile" else "Đang đọc lịch sử kênh Telegram")
+                )
                 api(config, "job-progress", payload, timeout=20)
                 if status_callback and current is not None:
                     status_callback(f"Đang nhập {current} bài từ {channel}")
                 last_heartbeat = time.time()
             time.sleep(2)
         code = process.wait()
+        result = worker_result(result_file)
+        current, total = progress_value(progress_file)
     ok = code == 0
-    api(config, "finish-job", {"job_id": job_id, "ok": ok, "error": None if ok else f"{job_type}_exit_{code}"})
+    message_count = current if job_type == "import" and current is not None else result.get("indexed_message_count")
+    completion = {"job_id": job_id, "ok": ok, "error": None if ok else f"{job_type}_exit_{code}"}
+    if isinstance(message_count, int) and message_count >= 0:
+        completion["message_count"] = message_count
+    deleted_count = result.get("deleted_count")
+    if isinstance(deleted_count, int) and deleted_count >= 0:
+        completion["deleted_count"] = deleted_count
+    api(config, "finish-job", completion)
     api(config, "profile-status", {"profile_id": profile_id, "status": "ready"})
     if not ok:
         raise RuntimeError(f"{job_type}_exit_{code}")

@@ -219,6 +219,9 @@ async def main():
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
         registered = post_json(args.cloner_url, "/api/reader/register-source", args.ingest_secret, {"chat_id": str(bot_chat_id), "title": title, "username": username, "private_link_id": private_link_id})
         source_id = registered["source"]["id"]
+        history_summary = await client.get_messages(entity, limit=0)
+        history_total = max(0, int(getattr(history_summary, "total", 0) or 0))
+        write_progress(args.progress_file, 0, history_total)
         role = "MASTER mirror" if registered.get("mirror_master") else "nguồn V4 không MASTER"
         print(f"Source: {title} ({source_id}) · {role}")
         pinned_ids = set()
@@ -242,7 +245,7 @@ async def main():
             batch.append(item); count += 1
             if len(batch) >= args.batch_size:
                 result = post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
-                write_progress(args.progress_file, count)
+                write_progress(args.progress_file, count, history_total)
                 print(f"Indexed {count} messages; links found in batch: {result.get('internal_links', 0)}"); batch = []
         if batch:
             post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
