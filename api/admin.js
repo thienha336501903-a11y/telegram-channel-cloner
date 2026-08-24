@@ -1,6 +1,7 @@
 import cloneHandler from '../server/admin/clone.js';
 import destinationsHandler from '../server/admin/destinations.js';
 import readerJobHandler from '../server/admin/reader-job.js';
+import readerManagerHandler from '../server/admin/reader-manager.js';
 import runTickHandler from '../server/admin/run-tick.js';
 import sourceHandler from '../server/admin/source.js';
 import summaryHandler from '../server/admin/summary.js';
@@ -13,6 +14,7 @@ const handlers = {
   clone: cloneHandler,
   destinations: destinationsHandler,
   'reader-job': readerJobHandler,
+  'reader-manager': readerManagerHandler,
   'run-tick': runTickHandler,
   source: sourceHandler,
   summary: summaryHandler,

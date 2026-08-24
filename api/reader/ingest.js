@@ -1,5 +1,5 @@
 import { json, method, readJson } from '../../lib/http.js';
-import { requireEnv } from '../../lib/env.js';
+import { authenticateReaderRequest } from '../../lib/reader-manager.js';
 import { extractInternalLinks } from '../../lib/links.js';
 import { hasUsableReaderMtprotoMedia } from '../../lib/reader-media.js';
 import { recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
@@ -75,7 +75,7 @@ async function hydrateHistoricalMedia(source, saved, message) {
 
 export default async function handler(req, res) {
   if (!method(req, res, ['POST'])) return;
-  if (req.headers.authorization !== `Bearer ${requireEnv('READER_INGEST_SECRET')}`) return json(res, 401, { ok: false, error: 'unauthorized' });
+  if (!await authenticateReaderRequest(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
   const body = await readJson(req, { maxBytes: 8_000_000 });
   if (!body.source_id || !Array.isArray(body.messages)) return json(res, 400, { ok: false, error: 'source_id_and_messages_required' });
   const sources = await select(TABLES.sources, `select=*&id=eq.${encodeURIComponent(body.source_id)}&limit=1`);

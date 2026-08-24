@@ -37,7 +37,10 @@ export default async function handler(req, res) {
   let readerJobCreated = false;
   if (!source?.indexed_at) {
     try {
-      const queued = await queueReaderJob(source);
+      const requestedReader = String(body.reader_profile_id || '');
+      const queued = requestedReader
+        ? await queueReaderJob(source, { readerProfileId: requestedReader })
+        : await queueReaderJob(source);
       readerJob = queued.job;
       readerJobCreated = queued.created;
     } catch (error) {

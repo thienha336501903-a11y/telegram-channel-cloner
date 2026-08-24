@@ -16,6 +16,7 @@ from datetime import timezone
 
 import requests
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 
 
@@ -181,6 +182,22 @@ def post_json(base_url, path, secret, payload):
     return r.json()
 
 
+def local_session(value):
+    """Use an encrypted-at-rest StringSession supplied only by Reader Manager."""
+    session_string = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
+    return StringSession(session_string) if session_string else value
+
+
+def write_progress(path, current, total=None):
+    if not path:
+        return
+    payload = {"current": int(current)}
+    if isinstance(total, int) and total >= 0:
+        payload["total"] = total
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"))
@@ -189,13 +206,14 @@ async def main():
     p.add_argument("--cloner-url", required=True, help="https://telegram-channel-cloner.vercel.app")
     p.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     p.add_argument("--session", default="telegram-cloner-reader")
+    p.add_argument("--progress-file", help=argparse.SUPPRESS)
     # Keep each serverless request comfortably below the runtime deadline even
     # when a future/legacy message still requires Bot API hydration.
     p.add_argument("--batch-size", type=int, default=20)
     args = p.parse_args()
     if not args.api_id or not args.api_hash or not args.ingest_secret: p.error("api-id, api-hash and ingest-secret are required (flags or env vars)")
 
-    async with TelegramClient(args.session, args.api_id, args.api_hash) as client:
+    async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
         bot_chat_id = -1000000000000 - int(entity.id)
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
@@ -224,8 +242,11 @@ async def main():
             batch.append(item); count += 1
             if len(batch) >= args.batch_size:
                 result = post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
+                write_progress(args.progress_file, count)
                 print(f"Indexed {count} messages; links found in batch: {result.get('internal_links', 0)}"); batch = []
-        if batch: post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
+        if batch:
+            post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
+            write_progress(args.progress_file, count, count)
         post_json(args.cloner_url, "/api/reader/complete", args.ingest_secret, {"source_id": source_id, "message_count": count})
         print(f"Done. Indexed {count} messages. MASTER mirror role was not changed.")
 

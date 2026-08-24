@@ -14,7 +14,7 @@ from pathlib import Path
 
 from telethon import TelegramClient
 
-from export_history import post_json, resolve_channel
+from export_history import post_json, resolve_channel, local_session
 
 
 async def main():
@@ -45,7 +45,7 @@ async def main():
         raise RuntimeError("Reconcile plan did not return the registered Telegram chat id")
 
     present_ids = []
-    async with TelegramClient(args.session, args.api_id, args.api_hash) as client:
+    async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
         telegram_chat_id = str(-1000000000000 - int(entity.id))
         if telegram_chat_id != expected_chat_id:

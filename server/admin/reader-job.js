@@ -16,6 +16,9 @@ export default async function handler(req, res) {
   if (!source) return json(res, 404, { ok: false, error: 'source_not_found' });
 
   const jobType = body.job_type === 'reconcile' ? 'reconcile' : 'import';
-  const queued = await queueReaderJob(source, { jobType });
+  const requestedReader = String(body.reader_profile_id || '');
+  const queued = requestedReader
+    ? await queueReaderJob(source, { jobType, readerProfileId: requestedReader })
+    : await queueReaderJob(source, { jobType });
   return json(res, 200, { ok: true, reader_job: queued.job, created: queued.created });
 }
