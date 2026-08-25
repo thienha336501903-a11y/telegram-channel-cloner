@@ -13,7 +13,7 @@ function readerManagerPublicUrl() {
   if (process.env.VERCEL_ENV === 'preview' && previewHost) {
     return `https://${String(previewHost).trim().replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
   }
-  return 'https://telegram-channel-cloner.vercel.app';
+  return 'https://reader.yeubep.shop';
 }
 
 export default async function handler(req, res) {

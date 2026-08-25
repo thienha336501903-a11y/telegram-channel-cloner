@@ -203,7 +203,7 @@ async def main():
     p.add_argument("--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"))
     p.add_argument("--api-hash", default=os.getenv("TELEGRAM_API_HASH"))
     p.add_argument("--channel", required=True, help="@username, t.me link, t.me/c link, or numeric channel id")
-    p.add_argument("--cloner-url", required=True, help="https://telegram-channel-cloner.vercel.app")
+    p.add_argument("--cloner-url", required=True, help="https://reader.yeubep.shop")
     p.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     p.add_argument("--session", default="telegram-cloner-reader")
     p.add_argument("--progress-file", help=argparse.SUPPRESS)

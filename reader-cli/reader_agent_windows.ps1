@@ -1,5 +1,5 @@
 param(
-  [string]$ClonerUrl = "https://telegram-channel-cloner.vercel.app",
+  [string]$ClonerUrl = "https://reader.yeubep.shop",
   [switch]$Once,
   [switch]$NoUpdate,
   [switch]$ResetSecrets,
