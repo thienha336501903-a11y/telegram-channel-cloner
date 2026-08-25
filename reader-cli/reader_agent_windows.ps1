@@ -1,5 +1,5 @@
 param(
-  [string]$ClonerUrl = "https://reader.yeubep.shop",
+  [string]$ClonerUrl = $(if ($env:CLONER_URL) { $env:CLONER_URL } else { "https://reader.yeubep.shop" }),
   [switch]$Once,
   [switch]$NoUpdate,
   [switch]$ResetSecrets,

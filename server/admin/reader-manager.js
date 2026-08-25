@@ -5,6 +5,7 @@ import {
   createReaderPairing,
   listReaderManagerState
 } from '../../lib/reader-manager.js';
+import { cloneConfig } from '../../lib/clone-config.js';
 
 function readerManagerPublicUrl() {
   const explicit = String(process.env.READER_MANAGER_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -13,7 +14,7 @@ function readerManagerPublicUrl() {
   if (process.env.VERCEL_ENV === 'preview' && previewHost) {
     return `https://${String(previewHost).trim().replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
   }
-  return 'https://reader.yeubep.shop';
+  return cloneConfig().clonerPublicUrl;
 }
 
 export default async function handler(req, res) {

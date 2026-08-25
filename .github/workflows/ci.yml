@@ -24,6 +24,8 @@ jobs:
         run: npm test
       - name: JavaScript syntax
         run: npm run check
+      - name: Clone configuration isolation
+        run: npm run check:clone
       - name: Python syntax
         run: python -m py_compile reader-cli/export_history.py
       - name: Secret hygiene

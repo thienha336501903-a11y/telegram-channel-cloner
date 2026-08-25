@@ -39,11 +39,13 @@
     <section class="card"><h3 style="margin-top:0">Cảnh báo</h3><div id="warnings"></div></section>
   </div>
 </div>
+<script src="/api/public-config.js"></script>
 <script>
 const $=s=>document.querySelector(s);
+const runtimeConfig=window.CLONE_RUNTIME_CONFIG||{};
 let state=null;
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-function safeWizardReturn(){const raw=new URLSearchParams(location.search).get('returnTo');if(!raw)return '';try{const u=new URL(raw);const host=u.hostname.toLowerCase();const preview=((host.startsWith('yeunauan-lms-clone-')||host.startsWith('yeunauan-lms-git-'))&&host.endsWith('.vercel.app'));if(u.protocol!=='https:'||u.pathname!=='/v4-course-wizard.html'||!(host==='hoc.yeubep.shop'||host==='yeunauan-lms-clone.vercel.app'||preview))return '';return u.origin+u.pathname}catch{return ''}}
+function safeWizardReturn(){const raw=new URLSearchParams(location.search).get('returnTo');if(!raw)return '';try{const u=new URL(raw),lms=new URL(runtimeConfig.lmsPublicUrl||location.origin);const preview=/\.vercel\.app$/.test(u.hostname)&&u.hostname.includes('lms');if(u.protocol!=='https:'||u.pathname!=='/v4-course-wizard.html'||!(u.origin===lms.origin||preview))return '';return u.origin+u.pathname}catch{return ''}}
 async function api(path, options={}){ const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}}); const j=await r.json().catch(()=>({})); if(r.status===401) throw Object.assign(new Error('unauthorized'),{unauthorized:true}); if(!r.ok) throw new Error(j.error||j.message||'API error'); return j; }
 function pill(status){ const c=status==='done'||status==='copied'?'ok':status==='failed'?'bad':'warn'; return `<span class="pill ${c}">${esc(status||'—')}</span>`; }
 function table(headers, rows){ if(!rows.length)return '<div class="empty">Chưa có dữ liệu.</div>'; return `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`; }
