@@ -3,9 +3,9 @@ import re
 from urllib.parse import urlparse
 
 
-DEFAULT_CLONER_URL = "https://telegram-channel-cloner.vercel.app"
+DEFAULT_CLONER_URL = "https://reader.yeubep.shop"
 PAIRING_PACKAGE_PREFIX = "YNA1"
-PRODUCTION_CLONER_HOST = "telegram-channel-cloner.vercel.app"
+PRODUCTION_CLONER_HOST = "reader.yeubep.shop"
 PREVIEW_CLONER_HOST = re.compile(
     r"^telegram-(?:chan-git|channel-cloner)-[a-z0-9-]+-thienha100022653824678-stacks-projects\.vercel\.app$"
 )

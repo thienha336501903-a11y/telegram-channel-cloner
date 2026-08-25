@@ -1,6 +1,6 @@
 param(
   [string]$TaskName = "YeuNauAn Telegram Reader Agent",
-  [string]$ClonerUrl = "https://telegram-channel-cloner.vercel.app"
+  [string]$ClonerUrl = "https://reader.yeubep.shop"
 )
 
 Set-StrictMode -Version 2.0

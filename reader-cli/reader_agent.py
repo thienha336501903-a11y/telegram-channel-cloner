@@ -79,7 +79,7 @@ def nonnegative_int(value):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cloner-url", default=os.getenv("CLONER_URL", "https://telegram-channel-cloner.vercel.app"))
+    parser.add_argument("--cloner-url", default=os.getenv("CLONER_URL", "https://reader.yeubep.shop"))
     parser.add_argument("--ingest-secret", default=os.getenv("READER_INGEST_SECRET"))
     parser.add_argument("--agent-id", default=os.getenv("READER_AGENT_ID") or default_agent_id())
     parser.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)

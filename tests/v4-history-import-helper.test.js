@@ -52,7 +52,7 @@ test('Windows helper stores reusable secrets with DPAPI and remains local-only',
   assert.match(powershell, /Tracked local changes exist; skipping automatic reader update/);
   assert.match(powershell, /pip install -r/);
   assert.match(powershell, /export_history\.py/);
-  assert.match(powershell, /https:\/\/telegram-channel-cloner\.vercel\.app/);
+  assert.match(powershell, /https:\/\/reader\.yeubep\.shop/);
   assert.match(cmd, /ExecutionPolicy Bypass/);
   assert.match(cmd, /import_history_windows\.ps1/);
   assert.match(gitignore, /reader-cli\/\.reader-windows-secrets\.json/);
