@@ -40,7 +40,7 @@ minLength('CRON_SECRET', 32);
 minLength('INTERNAL_SYNC_SECRET', 32);
 
 for (const name of ['CLONER_PUBLIC_URL', 'LMS_PUBLIC_URL', 'V4_PUBLIC_URL']) {
-  const value = clean(present(name));
+  const value = clean(process.env[name]);
   if (value) {
     try {
       const url = new URL(value);
