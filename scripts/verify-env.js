@@ -37,6 +37,19 @@ if (webhookSecret && !/^[A-Za-z0-9_-]+$/.test(webhookSecret)) {
 
 minLength('READER_INGEST_SECRET', 32);
 minLength('CRON_SECRET', 32);
+minLength('INTERNAL_SYNC_SECRET', 32);
+
+for (const name of ['CLONER_PUBLIC_URL', 'LMS_PUBLIC_URL', 'V4_PUBLIC_URL']) {
+  const value = clean(present(name));
+  if (value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || url.origin !== value.replace(/\/$/, '')) failures.push(`${name}: must be an HTTPS origin without a path`);
+    } catch {
+      failures.push(`${name}: invalid URL`);
+    }
+  }
+}
 
 if (failures.length) {
   console.error('Runtime environment validation failed:');

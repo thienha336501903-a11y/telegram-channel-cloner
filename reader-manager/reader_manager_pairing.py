@@ -1,14 +1,13 @@
 """Parse one-field Reader Manager pairing packages without network access."""
+import os
 import re
 from urllib.parse import urlparse
 
 
-DEFAULT_CLONER_URL = "https://reader.yeubep.shop"
+DEFAULT_CLONER_URL = os.getenv("CLONER_URL", "https://reader.yeubep.shop").rstrip("/")
 PAIRING_PACKAGE_PREFIX = "YNA1"
-PRODUCTION_CLONER_HOST = "reader.yeubep.shop"
-PREVIEW_CLONER_HOST = re.compile(
-    r"^telegram-(?:chan-git|channel-cloner)-[a-z0-9-]+-thienha100022653824678-stacks-projects\.vercel\.app$"
-)
+PRODUCTION_CLONER_HOST = str(urlparse(DEFAULT_CLONER_URL).hostname or "").lower()
+PREVIEW_CLONER_HOST = re.compile(os.getenv("CLONER_PREVIEW_HOST_PATTERN", r"^telegram-(?:chan-git|channel-cloner)-[a-z0-9-]+-thienha100022653824678-stacks-projects\.vercel\.app$"))
 
 
 def allowed_cloner_url(value):

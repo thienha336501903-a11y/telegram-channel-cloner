@@ -13,10 +13,10 @@ test('Cloner exposes an opt-in return control for the LMS Wizard', () => {
 test('returnTo is restricted to the LMS Wizard on approved Vercel hosts', () => {
   assert.match(html, /u\.protocol!=='https:'/);
   assert.match(html, /u\.pathname!=='\/v4-course-wizard\.html'/);
-  assert.match(html, /host==='yeunauan-lms-clone\.vercel\.app'/);
-  assert.match(html, /host\.startsWith\('yeunauan-lms-clone-'\)/);
-  assert.match(html, /host\.startsWith\('yeunauan-lms-git-'\)/);
-  assert.match(html, /host\.endsWith\('\.vercel\.app'\)/);
+  assert.match(html, /runtimeConfig\.lmsPublicUrl/);
+  assert.match(html, /u\.origin===lms\.origin/);
+  assert.match(html, /vercel\\\.app/);
+  assert.match(html, /u\.hostname\.includes\('lms'\)/);
   assert.match(html, /return u\.origin\+u\.pathname/);
 });
 
