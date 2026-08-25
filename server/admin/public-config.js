@@ -1,4 +1,4 @@
-import { cloneConfig } from '../lib/clone-config.js';
+import { cloneConfig } from '../../lib/clone-config.js';
 
 export default function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end();

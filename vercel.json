@@ -8,6 +8,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/public-config.js",
+      "destination": "/api/admin?action=public-config"
+    },
+    {
       "source": "/api/admin/:action",
       "destination": "/api/admin?action=:action"
     }
