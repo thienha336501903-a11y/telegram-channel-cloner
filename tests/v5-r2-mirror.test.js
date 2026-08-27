@@ -7,6 +7,7 @@ const read = path => fs.readFileSync(new URL('../' + path, import.meta.url), 'ut
 const control = read('api/reader/complete.js');
 const jobs = read('lib/v5-mirror-jobs.js');
 const agent = read('reader-cli/reader_agent.py');
+const managedAgent = read('reader-manager/reader_manager_agent.py');
 const worker = read('reader-cli/mirror_v5_r2.py');
 const gitignore = read('.gitignore');
 const ci = read('.github/workflows/ci.yml');
@@ -20,13 +21,15 @@ test('V5 mirror reuses the existing authenticated Reader control function', () =
   assert.match(control, /value === null \|\| value === undefined \|\| value === '' \|\| typeof value === 'boolean'/);
 });
 
-test('mirror job ownership and R2 object key are enforced server-side', () => {
+test('mirror job ownership, object key, and reported bytes are enforced server-side', () => {
   assert.match(jobs, /rpc\/claim_v5_telegram_mirror_job/);
   assert.match(jobs, /rpc\/finish_v5_telegram_mirror_job/);
   assert.match(jobs, /status=eq\.running&locked_by=eq\./);
   assert.match(jobs, /function objectKeyFor/);
   assert.match(jobs, /media\/v5\/\$\{job\.course_id\}\/\$\{asset\.id\}/);
   assert.match(jobs, /v5_mirror_object_key_mismatch/);
+  assert.match(jobs, /v5_mirror_bytes_required/);
+  assert.match(jobs, /v5_mirror_size_mismatch/);
   assert.match(jobs, /expected_bytes: safeBytes\(asset\.bytes\)/);
   assert.doesNotMatch(jobs, /values\.payload/);
 });
@@ -41,6 +44,13 @@ test('Reader advertises V5 mirror only when all local R2 credentials exist', () 
   assert.match(agent, /control_path\("v5-mirror-claim"\)/);
   assert.match(agent, /heartbeat_action = "v5-mirror-heartbeat"/);
   assert.match(agent, /finish_action = "v5-mirror-finish"/);
+});
+
+test('mirror worker child never receives the Reader control secret', () => {
+  assert.match(agent, /env\.pop\("READER_INGEST_SECRET", None\)/);
+  assert.match(agent, /strip_reader_secret=job_type == "v5_mirror"/);
+  assert.match(managedAgent, /if job_type == "v5_mirror":[\s\S]*env\.pop\("READER_INGEST_SECRET", None\)/);
+  assert.match(managedAgent, /else:\s*\n\s*env\["READER_INGEST_SECRET"\] = config\["agent_token"\]/);
 });
 
 test('local mirror is resumable and idempotent across Telegram and R2 retries', () => {
