@@ -15,6 +15,7 @@ import { patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
 function safeProgress(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
@@ -105,8 +106,7 @@ export default async function handler(req, res) {
       jobId: body.job_id,
       agentId,
       progressCurrent: safeProgress(body.progress_current),
-      progressTotal: safeProgress(body.progress_total),
-      progressStage: body.progress_stage
+      progressTotal: safeProgress(body.progress_total)
     });
     if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
     return json(res, 200, { ok: true, job });
