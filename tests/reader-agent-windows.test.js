@@ -6,8 +6,10 @@ const read = path => fs.readFileSync(new URL('../' + path, import.meta.url), 'ut
 const agent = read('reader-cli/reader_agent.py');
 assert.match(agent, /READER_CONTROL_PATH = "\/api\/reader\/complete"/);
 assert.match(agent, /control_path\("claim"\)/);
-assert.match(agent, /control_path\("heartbeat"\)/);
-assert.match(agent, /control_path\("finish-job"\)/);
+assert.match(agent, /heartbeat_action="heartbeat"/);
+assert.match(agent, /control_path\(heartbeat_action\)/);
+assert.match(agent, /finish_action = "finish-job"/);
+assert.match(agent, /control_path\(finish_action\)/);
 assert.match(agent, /BASE_READER_CAPABILITIES = \["reconcile_v1"\]/);
 assert.match(agent, /V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"/);
 assert.match(agent, /def reader_capabilities\(\):/);
