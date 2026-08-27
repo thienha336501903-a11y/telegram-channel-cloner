@@ -28,13 +28,14 @@ assert.match(local, /"deleted_count": deleted/);
 assert.doesNotMatch(local, /session.*post_json/i);
 
 const agent = read('reader-cli/reader_agent.py');
-assert.match(agent, /READER_CAPABILITIES = \["reconcile_v1"\]/);
-assert.match(agent, /"capabilities": READER_CAPABILITIES/);
+assert.match(agent, /BASE_READER_CAPABILITIES = \["reconcile_v1"\]/);
+assert.match(agent, /capabilities = reader_capabilities\(\)/);
+assert.match(agent, /"capabilities": capabilities/);
 assert.match(agent, /reconcile_history\.py/);
 assert.match(agent, /job_type == "reconcile"/);
 assert.match(agent, /"--source-id"/);
 assert.match(agent, /Claimed \{job_type\} job/);
-assert.match(agent, /TemporaryDirectory\(prefix="tgcloner-reader-"\)/);
+assert.match(agent, /TemporaryDirectory\(prefix="tgcloner-reader-result-"\)/);
 assert.match(agent, /command\.extend\(\["--result-file", str\(result_file\)\]\)/);
 assert.match(agent, /completion\["deleted_count"\] = deleted_count/);
 
