@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main, 'feature/**', 'feat/**']
   pull_request:
     branches: [main]
 
@@ -27,12 +27,17 @@ jobs:
       - name: Clone configuration isolation
         run: npm run check:clone
       - name: Python syntax
-        run: python -m py_compile reader-cli/export_history.py
+        run: |
+          python -m py_compile reader-cli/export_history.py
+          python -m py_compile reader-cli/reconcile_history.py
+          python -m py_compile reader-cli/reader_agent.py
+          python -m py_compile reader-cli/mirror_v5_r2.py
       - name: Secret hygiene
         shell: bash
         run: |
           test ! -e .env
           test ! -e .env.local
           ! find . -type f -name '*.session*' -print -quit | grep -q .
+          ! find reader-cli -type f \( -name '*.part' -o -name '*.r2.json' \) -print -quit | grep -q .
           ! grep -RInE '(sb_secret_[A-Za-z0-9_-]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,})' . \
             --exclude-dir=.git --exclude='.env.example'
