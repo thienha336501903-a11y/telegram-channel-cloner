@@ -162,9 +162,9 @@ def run_job(config, job, stop_event, status_callback=None):
         "TELEGRAM_API_ID": str(profile["api_id"]),
         "TELEGRAM_API_HASH": profile["api_hash"],
         "TELEGRAM_SESSION_STRING": profile["session"],
-        "READER_INGEST_SECRET": config["agent_token"],
     })
     if job_type == "v5_mirror":
+        env.pop("READER_INGEST_SECRET", None)
         r2 = local_r2_config(config)
         env.update({
             "R2_ACCOUNT_ID": str(r2["account_id"]),
@@ -172,6 +172,8 @@ def run_job(config, job, stop_event, status_callback=None):
             "R2_SECRET_ACCESS_KEY": str(r2["secret_access_key"]),
             "R2_BUCKET": str(r2["bucket"]),
         })
+    else:
+        env["READER_INGEST_SECRET"] = config["agent_token"]
 
     try:
         with tempfile.TemporaryDirectory(prefix="yeunauan-reader-") as temp_dir:
