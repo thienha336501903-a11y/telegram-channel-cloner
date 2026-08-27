@@ -62,8 +62,20 @@ def reader_capabilities():
     return capabilities
 
 
-def run_worker(command, cwd, cloner_url, agent_id, job_id, secret, heartbeat_seconds, heartbeat_action="heartbeat"):
+def run_worker(
+    command,
+    cwd,
+    cloner_url,
+    agent_id,
+    job_id,
+    secret,
+    heartbeat_seconds,
+    heartbeat_action="heartbeat",
+    strip_reader_secret=False,
+):
     env = os.environ.copy()
+    if strip_reader_secret:
+        env.pop("READER_INGEST_SECRET", None)
     proc = subprocess.Popen(command, cwd=str(cwd), env=env)
     last_heartbeat = 0.0
     while True:
@@ -220,6 +232,7 @@ def main():
                     args.ingest_secret,
                     max(10, args.heartbeat_seconds),
                     heartbeat_action=heartbeat_action,
+                    strip_reader_secret=job_type == "v5_mirror",
                 )
                 worker_result = read_worker_result(result_file) if result_required else {}
 
