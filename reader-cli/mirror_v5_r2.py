@@ -42,6 +42,13 @@ def require_env(name):
     return value
 
 
+def bucket_name():
+    value = clean(os.getenv("R2_BUCKET") or os.getenv("V5_R2_BUCKET"))
+    if not value:
+        raise RuntimeError("R2_BUCKET or V5_R2_BUCKET is required")
+    return value
+
+
 def atomic_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -85,6 +92,21 @@ def message_size(message):
     return int(getattr(document, "size", 0) or 0)
 
 
+def head_matching_object(client, bucket, key, expected_bytes):
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = clean((exc.response or {}).get("Error", {}).get("Code"))
+        status = int((exc.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
+        if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+            return None
+        raise
+    remote_bytes = int(head.get("ContentLength") or 0)
+    if expected_bytes is not None and remote_bytes != int(expected_bytes):
+        return None
+    return {"bytes": remote_bytes, "etag": clean(head.get("ETag"))}
+
+
 async def download_resumable(client, entity, message_id, target, expected_bytes=0):
     message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
@@ -114,6 +136,8 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
                 print(f"Telegram download {existing}/{total} bytes", flush=True)
 
     actual = target.stat().st_size
+    if actual <= 0:
+        raise RuntimeError("telegram_download_empty")
     if total > 0 and actual != total:
         raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{total}")
     return message, actual
@@ -157,13 +181,22 @@ def load_or_create_checkpoint(client, bucket, key, content_type, checkpoint_path
 
 
 def upload_resumable(local_path, object_key, asset_id, content_type):
-    bucket = require_env("R2_BUCKET") if clean(os.getenv("R2_BUCKET")) else require_env("V5_R2_BUCKET")
+    bucket = bucket_name()
     client = r2_client()
     checkpoint_path = cache_root() / f"{asset_id}.r2.json"
+    total_bytes = local_path.stat().st_size
+    if total_bytes <= 0:
+        raise RuntimeError("mirror_local_file_empty")
+
+    existing = head_matching_object(client, bucket, object_key, total_bytes)
+    if existing:
+        checkpoint_path.unlink(missing_ok=True)
+        print(f"R2 object already complete: {total_bytes} bytes", flush=True)
+        return existing
+
     checkpoint = load_or_create_checkpoint(client, bucket, object_key, content_type, checkpoint_path)
     upload_id = checkpoint["upload_id"]
     completed = {int(number): etag for number, etag in (checkpoint.get("parts") or {}).items() if clean(etag)}
-    total_bytes = local_path.stat().st_size
     total_parts = max(1, math.ceil(total_bytes / PART_SIZE))
 
     with local_path.open("rb") as handle:
@@ -173,7 +206,7 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
             offset = (part_number - 1) * PART_SIZE
             handle.seek(offset)
             chunk = handle.read(min(PART_SIZE, total_bytes - offset))
-            if not chunk and total_bytes > 0:
+            if not chunk:
                 raise RuntimeError(f"empty_r2_part:{part_number}")
             response = client.upload_part(
                 Bucket=bucket,
@@ -197,12 +230,11 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
         UploadId=upload_id,
         MultipartUpload={"Parts": parts},
     )
-    head = client.head_object(Bucket=bucket, Key=object_key)
-    remote_bytes = int(head.get("ContentLength") or 0)
-    if remote_bytes != total_bytes:
-        raise RuntimeError(f"r2_size_mismatch:{remote_bytes}/{total_bytes}")
+    head = head_matching_object(client, bucket, object_key, total_bytes)
+    if not head:
+        raise RuntimeError("r2_size_mismatch_after_complete")
     checkpoint_path.unlink(missing_ok=True)
-    return {"bytes": remote_bytes, "etag": clean(head.get("ETag"))}
+    return head
 
 
 async def run(args):
@@ -211,16 +243,27 @@ async def run(args):
     require_env("R2_ACCOUNT_ID")
     require_env("R2_ACCESS_KEY_ID")
     require_env("R2_SECRET_ACCESS_KEY")
-    if not clean(os.getenv("R2_BUCKET")) and not clean(os.getenv("V5_R2_BUCKET")):
-        raise RuntimeError("R2_BUCKET or V5_R2_BUCKET is required")
+    bucket = bucket_name()
 
     cache = cache_root()
     local_name = safe_name(args.original_filename)
     local_path = cache / f"{args.asset_id}-{local_name}.part"
+    checkpoint_path = cache / f"{args.asset_id}.r2.json"
+    expected = int(args.expected_bytes or 0)
+
+    # If R2 was already completed but the finish callback was lost, a retry can
+    # acknowledge the existing object without downloading Telegram again.
+    if expected > 0:
+        existing = head_matching_object(r2_client(), bucket, args.object_key, expected)
+        if existing:
+            local_path.unlink(missing_ok=True)
+            checkpoint_path.unlink(missing_ok=True)
+            print(f"R2 object already complete before retry: {expected} bytes", flush=True)
+            return {"object_key": args.object_key, "bytes": existing["bytes"], "etag": existing["etag"]}
 
     async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
-        _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, args.expected_bytes)
+        _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected)
 
     uploaded = upload_resumable(local_path, args.object_key, args.asset_id, args.mime_type)
     if uploaded["bytes"] != actual_bytes:
