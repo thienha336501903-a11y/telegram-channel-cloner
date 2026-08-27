@@ -32,6 +32,9 @@ jobs:
           python -m py_compile reader-cli/reconcile_history.py
           python -m py_compile reader-cli/reader_agent.py
           python -m py_compile reader-cli/mirror_v5_r2.py
+          python -m py_compile reader-manager/reader_manager_agent.py
+          python -m py_compile reader-manager/reader_manager_gui.py
+          python -m py_compile reader-manager/reader_manager_storage.py
       - name: Secret hygiene
         shell: bash
         run: |
