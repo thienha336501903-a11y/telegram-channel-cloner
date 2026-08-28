@@ -16,6 +16,11 @@ reader-cli/*.session*
 reader-cli/.venv/
 reader-cli/.reader-windows-secrets.json
 
+# V5 local Telegram/R2 mirror cache and resumable media
+reader-cli/.v5-r2-cache/
+*.part
+*.r2.json
+
 # Python / OS noise
 __pycache__/
 *.pyc
