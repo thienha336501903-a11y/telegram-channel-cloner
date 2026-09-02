@@ -17,8 +17,8 @@
     "node": "24.x"
   },
   "dependencies": {
-    "@vercel/functions": "^3.9.3",
+    "@vercel/functions": "^3.9.5",
     "big-integer": "^1.6.48",
-    "teleproto": "1.228.4"
+    "teleproto": "1.229.0"
   }
 }
