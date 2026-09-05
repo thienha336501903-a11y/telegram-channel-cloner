@@ -28,3 +28,31 @@ test('Clone Factory accepts an isolated System C URL set', () => {
 test('Clone Factory rejects a non-HTTPS origin', () => {
   assert.throws(() => cloneConfig({ LMS_PUBLIC_URL: 'http://learn.example.com' }), /clone_config_invalid_https_origin/);
 });
+
+test('V4 playback allows current System B LMS previews owned by the known Vercel teams', () => {
+  assert.equal(
+    isConfiguredV4Origin('https://yeunauan-lms-v4-test-9r4yq3md5-thienha336501903-a11ys-projects.vercel.app', {}),
+    true
+  );
+  assert.equal(
+    isConfiguredV4Origin('https://yeunauan-lms-v4-test-git-345a2b-thienha336501903-a11ys-projects.vercel.app', {}),
+    true
+  );
+  assert.equal(
+    isConfiguredV4Origin('https://yeunauan-lms-clone-abc123-thienha100022653824678-stacks-projects.vercel.app', {}),
+    true
+  );
+  assert.equal(
+    isConfiguredV4Origin('https://yeunauan-lms-git-feature123-thienha100022653824678-stacks-projects.vercel.app', {}),
+    true
+  );
+});
+
+test('V4 playback rejects look-alike Vercel hosts outside the owned teams', () => {
+  assert.equal(isConfiguredV4Origin('https://yeunauan-lms-v4-test-attacker.vercel.app', {}), false);
+  assert.equal(isConfiguredV4Origin('https://yeunauan-lms-clone-attacker-team.vercel.app', {}), false);
+  assert.equal(
+    isConfiguredV4Origin('https://yeunauan-lms-v4-test-abc-attacker-projects.vercel.app', {}),
+    false
+  );
+});
