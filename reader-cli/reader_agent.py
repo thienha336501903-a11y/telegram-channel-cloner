@@ -208,6 +208,7 @@ def main():
                     "--original-filename", str(job.get("original_filename") or "telegram-media"),
                     "--mime-type", str(job.get("mime_type") or "application/octet-stream"),
                     "--expected-bytes", str(int(job.get("expected_bytes") or 0)),
+                    "--media-variant", str(job.get("media_variant") or "media"),
                 ]
                 heartbeat_action = "v5-mirror-heartbeat"
                 finish_action = "v5-mirror-finish"

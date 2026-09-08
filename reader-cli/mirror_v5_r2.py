@@ -143,6 +143,26 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
     return message, actual
 
 
+async def download_thumbnail(client, entity, message_id, target, expected_bytes=0):
+    message = await client.get_messages(entity, ids=int(message_id))
+    if not message or not getattr(message, "media", None):
+        raise RuntimeError("telegram_media_message_missing")
+    existing = target.stat().st_size if target.exists() else 0
+    if expected_bytes > 0 and existing == int(expected_bytes):
+        return message, existing
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    downloaded = await client.download_media(message, file=str(target), thumb=-1)
+    if not downloaded or not target.exists():
+        raise RuntimeError("telegram_thumbnail_missing")
+    actual = target.stat().st_size
+    if actual <= 0:
+        raise RuntimeError("telegram_thumbnail_empty")
+    if expected_bytes > 0 and actual != int(expected_bytes):
+        raise RuntimeError(f"telegram_thumbnail_size_mismatch:{actual}/{expected_bytes}")
+    return message, actual
+
+
 def list_uploaded_parts(client, bucket, key, upload_id):
     parts = {}
     marker = None
@@ -263,7 +283,10 @@ async def run(args):
 
     async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
-        _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected)
+        if args.media_variant == "thumbnail":
+            _, actual_bytes = await download_thumbnail(client, entity, args.message_id, local_path, expected)
+        else:
+            _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected)
 
     uploaded = upload_resumable(local_path, args.object_key, args.asset_id, args.mime_type)
     if uploaded["bytes"] != actual_bytes:
@@ -284,6 +307,7 @@ def main():
     parser.add_argument("--original-filename", default="telegram-media")
     parser.add_argument("--mime-type", default="application/octet-stream")
     parser.add_argument("--expected-bytes", type=int, default=0)
+    parser.add_argument("--media-variant", choices=["media", "thumbnail"], default="media")
     parser.add_argument("--result-file", required=True)
     args = parser.parse_args()
 
