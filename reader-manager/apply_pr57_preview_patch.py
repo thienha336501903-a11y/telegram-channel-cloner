@@ -13,10 +13,9 @@ old = '''def api(config, action, payload=None, timeout=45):
 new = '''def api(config, action, payload=None, timeout=45):
     url = config.get("cloner_url", DEFAULT_CLONER_URL).rstrip("/") + f"{CONTROL_PATH}?action={action}"
     headers = {"Authorization": f"Bearer {config['agent_token']}", "Content-Type": "application/json"}
-    bypass_secret = str(config.get("vercel_automation_bypass_secret") or "").strip()
-    if bypass_secret:
-        headers["x-vercel-protection-bypass"] = bypass_secret
-        headers["x-vercel-set-bypass-cookie"] = "true"
+    share_cookie = str(config.get("vercel_share_cookie") or "").strip()
+    if share_cookie:
+        headers["Cookie"] = share_cookie
     response = requests.post(
         url,
         headers=headers,
@@ -27,4 +26,4 @@ new = '''def api(config, action, payload=None, timeout=45):
 if old not in text:
     raise SystemExit("preview_patch_target_not_found")
 path.write_text(text.replace(old, new, 1), encoding="utf-8")
-print("Applied PR57 Preview automation-bypass patch to Reader Manager build source.")
+print("Applied PR57 Preview share-cookie patch to Reader Manager build source.")
