@@ -195,6 +195,7 @@ def run_job(config, job, stop_event, status_callback=None):
                     "--original-filename", str(job.get("original_filename") or "telegram-media"),
                     "--mime-type", str(job.get("mime_type") or "application/octet-stream"),
                     "--expected-bytes", str(int(job.get("expected_bytes") or 0)),
+                    "--media-variant", str(job.get("media_variant") or "media"),
                     "--result-file", str(result_file),
                 ]
                 stage = "mirroring_r2"

@@ -66,6 +66,16 @@ test('local mirror is resumable and idempotent across Telegram and R2 retries', 
   assert.doesNotMatch(worker, /READER_INGEST_SECRET/);
 });
 
+test('V5 mirror can persist Telegram video thumbnails as separate private R2 assets', () => {
+  assert.match(jobs, /media_variant: mediaVariant/);
+  assert.match(jobs, /telegramMetadata\.variant === 'thumbnail'/);
+  assert.match(worker, /async def download_thumbnail/);
+  assert.match(worker, /client\.download_media\(message, file=str\(target\), thumb=-1\)/);
+  assert.match(worker, /args\.media_variant == "thumbnail"/);
+  assert.match(agent, /"--media-variant", str\(job\.get\("media_variant"\) or "media"\)/);
+  assert.match(managedAgent, /"--media-variant", str\(job\.get\("media_variant"\) or "media"\)/);
+});
+
 test('mirror media/checkpoints are excluded from Git and all Reader scripts compile in CI', () => {
   assert.match(gitignore, /reader-cli\/\.v5-r2-cache\//);
   assert.match(gitignore, /\*\.part/);
