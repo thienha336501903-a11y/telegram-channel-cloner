@@ -21,6 +21,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      - name: Apply PR57 Preview E2E patch
+        shell: powershell
+        run: python ./reader-manager/apply_pr57_preview_patch.py
       - name: Build installer
         shell: powershell
         run: ./reader-manager/build.ps1
