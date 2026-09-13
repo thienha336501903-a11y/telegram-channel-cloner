@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 
 import boto3
@@ -64,6 +65,31 @@ def read_json(path):
         return {}
 
 
+_last_progress_time = 0
+
+
+def report_progress(progress_file, stage, current, total):
+    global _last_progress_time
+    if not progress_file:
+        return
+    now = time.time()
+    curr_int = int(current or 0)
+    total_int = int(total) if total is not None and int(total) > 0 else None
+    is_done = total_int is not None and curr_int >= total_int
+    if not is_done and (now - _last_progress_time) < 0.8:
+        return
+    _last_progress_time = now
+    payload = {
+        "stage": stage,
+        "current": curr_int,
+        "total": total_int,
+    }
+    try:
+        atomic_json(Path(progress_file), payload)
+    except Exception:
+        pass
+
+
 def r2_client():
     account_id = require_env("R2_ACCOUNT_ID")
     return boto3.client(
@@ -107,7 +133,7 @@ def head_matching_object(client, bucket, key, expected_bytes):
     return {"bytes": remote_bytes, "etag": clean(head.get("ETag"))}
 
 
-async def download_resumable(client, entity, message_id, target, expected_bytes=0):
+async def download_resumable(client, entity, message_id, target, expected_bytes=0, is_photo=False, progress_file=None):
     message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
         raise RuntimeError("telegram_media_message_missing")
@@ -117,7 +143,8 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
     if total > 0 and existing > total:
         target.unlink(missing_ok=True)
         existing = 0
-    if total > 0 and existing == total:
+    if total > 0 and existing == total and not is_photo:
+        report_progress(progress_file, "telegram_download", existing, total)
         return message, total
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +159,7 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
                 continue
             handle.write(chunk)
             existing += len(chunk)
+            report_progress(progress_file, "telegram_download", existing, total)
             if total > 0:
                 print(f"Telegram download {existing}/{total} bytes", flush=True)
 
@@ -139,16 +167,32 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
     if actual <= 0:
         raise RuntimeError("telegram_download_empty")
     if total > 0 and actual != total:
-        raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{total}")
+        if not is_photo:
+            raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{total}")
+        # Photo representation mismatch: perform fresh-download validation
+        print(f"Telegram photo size mismatch ({actual}/{total}), performing fresh download validation...", flush=True)
+        target.unlink(missing_ok=True)
+        downloaded = await client.download_media(message.media, file=str(target))
+        if not downloaded or not target.exists():
+            raise RuntimeError("telegram_photo_fresh_download_missing")
+        actual = target.stat().st_size
+        if actual <= 0:
+            raise RuntimeError("telegram_photo_fresh_download_empty")
+        print(f"Telegram photo fresh download validated: {actual} bytes (was expected {total})", flush=True)
+        report_progress(progress_file, "telegram_download", actual, actual)
+    else:
+        report_progress(progress_file, "telegram_download", actual, total or actual)
     return message, actual
 
 
-async def download_thumbnail(client, entity, message_id, target, expected_bytes=0):
+async def download_thumbnail(client, entity, message_id, target, expected_bytes=0, progress_file=None):
     message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
         raise RuntimeError("telegram_media_message_missing")
+    expected = int(expected_bytes or 0)
     existing = target.stat().st_size if target.exists() else 0
-    if expected_bytes > 0 and existing == int(expected_bytes):
+    if expected > 0 and existing == expected:
+        report_progress(progress_file, "telegram_download", existing, expected)
         return message, existing
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
@@ -158,8 +202,9 @@ async def download_thumbnail(client, entity, message_id, target, expected_bytes=
     actual = target.stat().st_size
     if actual <= 0:
         raise RuntimeError("telegram_thumbnail_empty")
-    if expected_bytes > 0 and actual != int(expected_bytes):
-        raise RuntimeError(f"telegram_thumbnail_size_mismatch:{actual}/{expected_bytes}")
+    if expected > 0 and actual != expected:
+        print(f"Telegram thumbnail size mismatch ({actual}/{expected}), fresh download accepted", flush=True)
+    report_progress(progress_file, "telegram_download", actual, actual)
     return message, actual
 
 
@@ -200,7 +245,7 @@ def load_or_create_checkpoint(client, bucket, key, content_type, checkpoint_path
     return create_checkpoint(client, bucket, key, content_type, checkpoint_path)
 
 
-def upload_resumable(local_path, object_key, asset_id, content_type):
+def upload_resumable(local_path, object_key, asset_id, content_type, progress_file=None):
     bucket = bucket_name()
     client = r2_client()
     checkpoint_path = cache_root() / f"{asset_id}.r2.json"
@@ -211,6 +256,7 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
     existing = head_matching_object(client, bucket, object_key, total_bytes)
     if existing:
         checkpoint_path.unlink(missing_ok=True)
+        report_progress(progress_file, "r2_upload", total_bytes, total_bytes)
         print(f"R2 object already complete: {total_bytes} bytes", flush=True)
         return existing
 
@@ -222,6 +268,7 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
     with local_path.open("rb") as handle:
         for part_number in range(1, total_parts + 1):
             if part_number in completed:
+                report_progress(progress_file, "r2_upload", min(part_number * PART_SIZE, total_bytes), total_bytes)
                 continue
             offset = (part_number - 1) * PART_SIZE
             handle.seek(offset)
@@ -241,6 +288,8 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
             completed[part_number] = etag
             checkpoint["parts"] = {str(number): value for number, value in sorted(completed.items())}
             atomic_json(checkpoint_path, checkpoint)
+            uploaded_bytes = min(part_number * PART_SIZE, total_bytes)
+            report_progress(progress_file, "r2_upload", uploaded_bytes, total_bytes)
             print(f"R2 upload part {part_number}/{total_parts}", flush=True)
 
     parts = [{"PartNumber": number, "ETag": completed[number]} for number in range(1, total_parts + 1)]
@@ -254,6 +303,7 @@ def upload_resumable(local_path, object_key, asset_id, content_type):
     if not head:
         raise RuntimeError("r2_size_mismatch_after_complete")
     checkpoint_path.unlink(missing_ok=True)
+    report_progress(progress_file, "r2_upload", total_bytes, total_bytes)
     return head
 
 
@@ -270,6 +320,7 @@ async def run(args):
     local_path = cache / f"{args.asset_id}-{local_name}.part"
     checkpoint_path = cache / f"{args.asset_id}.r2.json"
     expected = int(args.expected_bytes or 0)
+    progress_file = getattr(args, "progress_file", None)
 
     # If R2 was already completed but the finish callback was lost, a retry can
     # acknowledge the existing object without downloading Telegram again.
@@ -278,17 +329,27 @@ async def run(args):
         if existing:
             local_path.unlink(missing_ok=True)
             checkpoint_path.unlink(missing_ok=True)
+            report_progress(progress_file, "r2_upload", expected, expected)
             print(f"R2 object already complete before retry: {expected} bytes", flush=True)
             return {"object_key": args.object_key, "bytes": existing["bytes"], "etag": existing["etag"]}
+
+    is_photo = (
+        args.media_variant == "thumbnail"
+        or clean(args.mime_type).startswith("image/")
+        or bool(re.search(r"\.(jpe?g|png|webp|gif)$", clean(args.original_filename), re.I))
+    )
 
     async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
         if args.media_variant == "thumbnail":
-            _, actual_bytes = await download_thumbnail(client, entity, args.message_id, local_path, expected)
+            _, actual_bytes = await download_thumbnail(client, entity, args.message_id, local_path, expected, progress_file=progress_file)
         else:
-            _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected)
+            message_obj = await client.get_messages(entity, ids=int(args.message_id))
+            if message_obj and (getattr(message_obj, "photo", None) or getattr(getattr(message_obj, "media", None), "photo", None)):
+                is_photo = True
+            _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected, is_photo=is_photo, progress_file=progress_file)
 
-    uploaded = upload_resumable(local_path, args.object_key, args.asset_id, args.mime_type)
+    uploaded = upload_resumable(local_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file)
     if uploaded["bytes"] != actual_bytes:
         raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")
     local_path.unlink(missing_ok=True)
@@ -308,6 +369,7 @@ def main():
     parser.add_argument("--mime-type", default="application/octet-stream")
     parser.add_argument("--expected-bytes", type=int, default=0)
     parser.add_argument("--media-variant", choices=["media", "thumbnail"], default="media")
+    parser.add_argument("--progress-file", default=None)
     parser.add_argument("--result-file", required=True)
     args = parser.parse_args()
 
