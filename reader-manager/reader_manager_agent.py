@@ -16,7 +16,7 @@ from telethon.sessions import StringSession
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -90,14 +90,40 @@ def ready_profiles(config):
     ]
 
 
+_SOURCE_ACCESS_CACHE = {}  # (source_id, channel, profile_id) -> timestamp
+SOURCE_ACCESS_CACHE_TTL = 240  # 4 minutes
+
+
+def invalidate_source_access_cache(source_id=None, channel=None, profile_id=None):
+    global _SOURCE_ACCESS_CACHE
+    if source_id is None and channel is None and profile_id is None:
+        _SOURCE_ACCESS_CACHE.clear()
+        return
+    keys_to_remove = [
+        k for k in _SOURCE_ACCESS_CACHE
+        if (source_id is None or k[0] == str(source_id))
+        and (channel is None or k[1] == str(channel))
+        and (profile_id is None or k[2] == str(profile_id))
+    ]
+    for k in keys_to_remove:
+        _SOURCE_ACCESS_CACHE.pop(k, None)
+
+
 def choose_v5_profile(config, channel, source_id):
     import asyncio
+    now = time.time()
     for profile in ready_profiles(config):
+        profile_id = str(profile.get("id") or "")
+        cache_key = (str(source_id), str(channel), profile_id)
+        if cache_key in _SOURCE_ACCESS_CACHE and (now - _SOURCE_ACCESS_CACHE[cache_key]) < SOURCE_ACCESS_CACHE_TTL:
+            return profile
         try:
             asyncio.run(verify_access(profile, channel))
+            _SOURCE_ACCESS_CACHE[cache_key] = now
             api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": True})
             return profile
         except Exception:
+            _SOURCE_ACCESS_CACHE.pop(cache_key, None)
             try:
                 api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": False, "error": "reader_source_access_denied"})
             except Exception:
@@ -111,6 +137,17 @@ def progress_value(path):
         return int(value.get("current", 0)), value.get("total")
     except Exception:
         return None, None
+
+
+def progress_info(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        current = int(value.get("current", 0)) if "current" in value else None
+        total = int(value.get("total")) if value.get("total") is not None else None
+        stage = str(value.get("stage") or "") or None
+        return current, total, stage
+    except Exception:
+        return None, None, None
 
 
 def worker_result(path):
@@ -196,6 +233,7 @@ def run_job(config, job, stop_event, status_callback=None):
                     "--mime-type", str(job.get("mime_type") or "application/octet-stream"),
                     "--expected-bytes", str(int(job.get("expected_bytes") or 0)),
                     "--media-variant", str(job.get("media_variant") or "media"),
+                    "--progress-file", str(progress_file),
                     "--result-file", str(result_file),
                 ]
                 stage = "mirroring_r2"
@@ -214,17 +252,31 @@ def run_job(config, job, stop_event, status_callback=None):
             if status_callback:
                 status_callback("Đang sao lưu video sang R2" if job_type == "v5_mirror" else f"Đang xử lý {channel}")
 
-            process = subprocess.Popen(command, env=env)
+            popen_kwargs = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+            process = subprocess.Popen(command, env=env, **popen_kwargs)
             last_heartbeat = 0
             while process.poll() is None:
                 if stop_event.is_set():
                     process.terminate()
                     break
-                if time.time() - last_heartbeat >= 10:
+                now_ts = time.time()
+                heartbeat_interval = 2.5 if job_type == "v5_mirror" else 10
+                if now_ts - last_heartbeat >= heartbeat_interval:
                     if job_type == "v5_mirror":
-                        api(config, "v5-mirror-heartbeat", {"job_id": job_id}, timeout=20)
+                        current, total, stage = progress_info(progress_file)
+                        payload = {"job_id": job_id}
+                        if current is not None:
+                            payload["progress_current"] = current
+                        if total is not None:
+                            payload["progress_total"] = total
+                        api(config, "v5-mirror-heartbeat", payload, timeout=20)
                         if status_callback:
-                            status_callback(f"Đang sao lưu media V5 từ {channel}")
+                            stage_desc = "Đang tải Telegram" if stage == "telegram_download" else ("Đang upload R2" if stage == "r2_upload" else "Đang sao lưu media V5")
+                            detail_str = f" ({current // 1048576} MB / {total // 1048576} MB)" if (current and total) else ""
+                            status_callback(f"{stage_desc}{detail_str} từ {channel}")
                     else:
                         current, total = progress_value(progress_file)
                         payload = {"job_id": job_id}
@@ -241,7 +293,7 @@ def run_job(config, job, stop_event, status_callback=None):
                         if status_callback and current is not None:
                             status_callback(f"Đang nhập {current} bài từ {channel}")
                     last_heartbeat = time.time()
-                time.sleep(2)
+                time.sleep(1 if job_type == "v5_mirror" else 2)
             code = process.wait()
             result = worker_result(result_file)
             current, total = progress_value(progress_file)
@@ -249,6 +301,8 @@ def run_job(config, job, stop_event, status_callback=None):
         if job_type == "v5_mirror":
             ok = code == 0 and result.get("ok") is True
             error = None if ok else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000]
+            if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
+                invalidate_source_access_cache(source_id, channel, profile_id)
             completion = {"job_id": job_id, "ok": ok, "error": error}
             if ok:
                 completion["object_key"] = str(result.get("object_key") or job.get("object_key") or "")
