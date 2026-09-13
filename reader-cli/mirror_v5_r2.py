@@ -16,12 +16,22 @@ import subprocess
 import time
 from pathlib import Path
 
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
-from telethon import TelegramClient
+try:
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None
+    Config = None
+    ClientError = Exception
 
-from export_history import local_session, resolve_channel
+try:
+    from telethon import TelegramClient
+    from export_history import local_session, resolve_channel
+except ImportError:
+    TelegramClient = None
+    local_session = None
+    resolve_channel = None
 
 PART_SIZE = 16 * 1024 * 1024
 DOWNLOAD_REQUEST_SIZE = 512 * 1024

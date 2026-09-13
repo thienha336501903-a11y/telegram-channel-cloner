@@ -70,7 +70,21 @@ test('6. Reader version bumped to 1.3.2 across agent and installer', () => {
   assert.match(installer, /#define MyAppVersion "1\.3\.2"/);
 });
 
-test('7. Functional test: synthetic MP4 with end moov remuxes to moov_before_mdat with preserved codecs', () => {
+function hasCommand(cmd) {
+  try {
+    const checkCmd = process.platform === 'win32' ? `where.exe ${cmd}` : `which ${cmd}`;
+    execSync(checkCmd, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('7. Functional test: synthetic MP4 with end moov remuxes to moov_before_mdat with preserved codecs', (t) => {
+  if (!hasCommand('ffmpeg') || !hasCommand('ffprobe')) {
+    t.skip('ffmpeg or ffprobe not available in test runner');
+    return;
+  }
   const pyScript = `
 import tempfile, subprocess, json, sys
 from pathlib import Path
@@ -122,7 +136,11 @@ with tempfile.TemporaryDirectory() as td:
   assert.ok(result.out_size > 0);
 });
 
-test('8. Functional test: corrupted/non-video input fails with faststart_remux_failed', () => {
+test('8. Functional test: corrupted/non-video input fails with faststart_remux_failed', (t) => {
+  if (!hasCommand('ffmpeg') || !hasCommand('ffprobe')) {
+    t.skip('ffmpeg or ffprobe not available in test runner');
+    return;
+  }
   const pyScript = `
 import tempfile, json, sys
 from pathlib import Path
