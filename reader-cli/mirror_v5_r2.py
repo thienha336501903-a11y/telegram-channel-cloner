@@ -11,8 +11,10 @@ import json
 import math
 import os
 import re
+import shutil
 import struct
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -169,9 +171,65 @@ def is_mp4_container(file_path):
         return False
 
 
-def probe_media(file_path):
+def resolve_binary(name):
+    """Resolve an executable binary, prioritizing bundled {app}/bin over system PATH.
+    Fail closed with faststart_dependency_missing if not found.
+    """
+    exe_name = f"{name}.exe" if os.name == "nt" and not name.endswith(".exe") else name
+    candidates = []
+
+    # 1. Check relative to sys.executable (Production {app}\bin\)
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "bin" / exe_name)
+        candidates.append(exe_dir / exe_name)
+    except Exception:
+        pass
+
+    # 2. Check relative to _MEIPASS if PyInstaller unpacked
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        try:
+            mei_dir = Path(meipass).resolve()
+            candidates.append(mei_dir / "bin" / exe_name)
+            candidates.append(mei_dir / exe_name)
+        except Exception:
+            pass
+
+    # 3. Check relative to this file / repository structure (dev / tests)
+    try:
+        cur_file = Path(__file__).resolve()
+        candidates.append(cur_file.parent / "bin" / exe_name)
+        candidates.append(cur_file.parents[1] / "reader-manager" / "bin" / exe_name)
+        candidates.append(cur_file.parents[1] / "bin" / exe_name)
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    # 4. Fallback to system PATH for dev environments
+    found_in_path = shutil.which(name) or shutil.which(exe_name)
+    if found_in_path:
+        return found_in_path
+
+    raise RuntimeError(f"faststart_dependency_missing:{name}_not_found")
+
+
+def get_ffmpeg_bin():
+    return resolve_binary("ffmpeg")
+
+
+def get_ffprobe_bin():
+    return resolve_binary("ffprobe")
+
+
+def probe_media(file_path, ffprobe_bin=None):
+    if not ffprobe_bin:
+        ffprobe_bin = get_ffprobe_bin()
     cmd = [
-        "ffprobe",
+        ffprobe_bin,
         "-v", "error",
         "-show_entries", "stream=index,codec_type,codec_name,duration:format=duration,size",
         "-of", "json",
@@ -197,9 +255,13 @@ def probe_media(file_path):
 
 
 def remux_video_faststart(input_path, output_path):
+    ffmpeg_bin = get_ffmpeg_bin()
+    ffprobe_bin = get_ffprobe_bin()
     try:
-        source_probe = probe_media(input_path)
+        source_probe = probe_media(input_path, ffprobe_bin=ffprobe_bin)
     except Exception as exc:
+        if "faststart_dependency_missing" in str(exc):
+            raise
         raise RuntimeError(f"faststart_remux_failed:source_probe_failed:{exc}") from exc
     source_streams = source_probe.get("streams", [])
     source_video = [s for s in source_streams if s.get("codec_type") == "video"]
@@ -209,12 +271,13 @@ def remux_video_faststart(input_path, output_path):
 
     output_path.unlink(missing_ok=True)
     cmd = [
-        "ffmpeg",
+        ffmpeg_bin,
         "-v", "error",
         "-y",
         "-i", str(input_path),
         "-c", "copy",
         "-movflags", "+faststart",
+        "-f", "mp4",
         str(output_path),
     ]
     popen_kwargs = {}
@@ -243,8 +306,10 @@ def remux_video_faststart(input_path, output_path):
         raise RuntimeError(f"faststart_remux_failed:{moov_err}")
 
     try:
-        output_probe = probe_media(output_path)
+        output_probe = probe_media(output_path, ffprobe_bin=ffprobe_bin)
     except Exception as exc:
+        if "faststart_dependency_missing" in str(exc):
+            raise
         raise RuntimeError(f"faststart_remux_failed:output_probe_failed:{exc}") from exc
     output_streams = output_probe.get("streams", [])
     output_video = [s for s in output_streams if s.get("codec_type") == "video"]

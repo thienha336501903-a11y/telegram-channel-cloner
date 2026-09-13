@@ -1,5 +1,5 @@
 #define MyAppName "Yêu Nấu Ăn Reader"
-#define MyAppVersion "1.3.2"
+#define MyAppVersion "1.3.3"
 #define MyAppExeName "YeuNauAnReader.exe"
 
 [Setup]
@@ -18,6 +18,8 @@ Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\YeuNauAnReaderImport.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\YeuNauAnReaderReconcile.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\YeuNauAnReaderMirror.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\ffmpeg.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "bin\ffprobe.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
