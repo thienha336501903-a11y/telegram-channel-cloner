@@ -25,3 +25,9 @@ reader-cli/.v5-r2-cache/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Build artifacts
+build/
+dist/
+reader-manager/dist/
+YeuNauAnReaderMirror.spec
