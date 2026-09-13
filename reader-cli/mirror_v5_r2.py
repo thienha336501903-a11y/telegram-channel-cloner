@@ -11,15 +11,27 @@ import json
 import math
 import os
 import re
+import struct
+import subprocess
 import time
 from pathlib import Path
 
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
-from telethon import TelegramClient
+try:
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None
+    Config = None
+    ClientError = Exception
 
-from export_history import local_session, resolve_channel
+try:
+    from telethon import TelegramClient
+    from export_history import local_session, resolve_channel
+except ImportError:
+    TelegramClient = None
+    local_session = None
+    resolve_channel = None
 
 PART_SIZE = 16 * 1024 * 1024
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
@@ -88,6 +100,176 @@ def report_progress(progress_file, stage, current, total):
         atomic_json(Path(progress_file), payload)
     except Exception:
         pass
+
+
+def parse_mp4_atoms(file_path):
+    """Parse top-level atoms of an MP4/ISOBMFF file.
+    Returns list of dicts: [{'name': 'ftyp', 'offset': 0, 'size': 32}, ...]
+    Raises ValueError on malformed atom size or truncation.
+    """
+    path = Path(file_path)
+    file_size = path.stat().st_size
+    atoms = []
+    with path.open("rb") as f:
+        offset = 0
+        while offset < file_size:
+            header = f.read(8)
+            if len(header) < 8:
+                if len(header) == 0:
+                    break
+                raise ValueError(f"truncated_atom_header:offset_{offset}")
+            size, name_bytes = struct.unpack(">I4s", header)
+            name = name_bytes.decode("latin1", errors="replace")
+            header_size = 8
+            if size == 1:
+                ext = f.read(8)
+                if len(ext) < 8:
+                    raise ValueError(f"truncated_extended_atom_size:offset_{offset}")
+                size = struct.unpack(">Q", ext)[0]
+                header_size = 16
+            elif size == 0:
+                size = file_size - offset
+
+            if size < header_size:
+                raise ValueError(f"malformed_atom_size:{name}_size_{size}_less_than_{header_size}")
+            if offset + size > file_size:
+                raise ValueError(f"atom_exceeds_file_size:{name}_offset_{offset}_size_{size}_file_{file_size}")
+
+            atoms.append({"name": name, "offset": offset, "size": size})
+            offset += size
+            f.seek(offset)
+    return atoms
+
+
+def check_moov_before_mdat(file_path):
+    atoms = parse_mp4_atoms(file_path)
+    moov_offset = None
+    mdat_offset = None
+    for atom in atoms:
+        if atom["name"] == "moov" and moov_offset is None:
+            moov_offset = atom["offset"]
+        elif atom["name"] == "mdat" and mdat_offset is None:
+            mdat_offset = atom["offset"]
+    if moov_offset is None:
+        return False, "moov_atom_missing"
+    if mdat_offset is None:
+        return False, "mdat_atom_missing"
+    if moov_offset < mdat_offset:
+        return True, None
+    return False, f"moov_after_mdat:{moov_offset}>{mdat_offset}"
+
+
+def is_mp4_container(file_path):
+    try:
+        atoms = parse_mp4_atoms(file_path)
+        if not atoms:
+            return False
+        return atoms[0]["name"] == "ftyp" or any(a["name"] in ("ftyp", "moov") for a in atoms)
+    except Exception:
+        return False
+
+
+def probe_media(file_path):
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "stream=index,codec_type,codec_name,duration:format=duration,size",
+        "-of", "json",
+        str(file_path),
+    ]
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+        **popen_kwargs,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"ffprobe_failed:{clean(res.stderr)[:200]}")
+    try:
+        return json.loads(res.stdout)
+    except Exception as exc:
+        raise RuntimeError(f"ffprobe_json_parse_error:{exc}")
+
+
+def remux_video_faststart(input_path, output_path):
+    try:
+        source_probe = probe_media(input_path)
+    except Exception as exc:
+        raise RuntimeError(f"faststart_remux_failed:source_probe_failed:{exc}") from exc
+    source_streams = source_probe.get("streams", [])
+    source_video = [s for s in source_streams if s.get("codec_type") == "video"]
+    source_audio = [s for s in source_streams if s.get("codec_type") == "audio"]
+    if not source_video:
+        raise RuntimeError("faststart_remux_failed:no_video_stream_in_source")
+
+    output_path.unlink(missing_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-v", "error",
+        "-y",
+        "-i", str(input_path),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=180,
+        **popen_kwargs,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"faststart_remux_failed:ffmpeg_exit_{res.returncode}:{clean(res.stderr)[:200]}")
+
+    if not output_path.exists():
+        raise RuntimeError("faststart_remux_failed:output_missing")
+
+    out_size = output_path.stat().st_size
+    if out_size <= 0:
+        raise RuntimeError("faststart_remux_failed:output_empty")
+
+    moov_ok, moov_err = check_moov_before_mdat(output_path)
+    if not moov_ok:
+        raise RuntimeError(f"faststart_remux_failed:{moov_err}")
+
+    try:
+        output_probe = probe_media(output_path)
+    except Exception as exc:
+        raise RuntimeError(f"faststart_remux_failed:output_probe_failed:{exc}") from exc
+    output_streams = output_probe.get("streams", [])
+    output_video = [s for s in output_streams if s.get("codec_type") == "video"]
+    output_audio = [s for s in output_streams if s.get("codec_type") == "audio"]
+
+    if not output_video:
+        raise RuntimeError("faststart_remux_failed:output_video_stream_missing")
+    if clean(output_video[0].get("codec_name")) != clean(source_video[0].get("codec_name")):
+        raise RuntimeError(f"faststart_remux_failed:video_codec_mismatch:{output_video[0].get('codec_name')}_vs_{source_video[0].get('codec_name')}")
+
+    if source_audio:
+        if not output_audio:
+            raise RuntimeError("faststart_remux_failed:output_audio_stream_missing")
+        if clean(output_audio[0].get("codec_name")) != clean(source_audio[0].get("codec_name")):
+            raise RuntimeError(f"faststart_remux_failed:audio_codec_mismatch:{output_audio[0].get('codec_name')}_vs_{source_audio[0].get('codec_name')}")
+
+    try:
+        src_dur = float(source_probe.get("format", {}).get("duration") or 0)
+        out_dur = float(output_probe.get("format", {}).get("duration") or 0)
+        if src_dur > 0 and out_dur > 0 and abs(src_dur - out_dur) > 0.5:
+            raise RuntimeError(f"faststart_remux_failed:duration_drift:{abs(src_dur - out_dur):.2f}s")
+    except (ValueError, TypeError):
+        pass
+
+    return out_size
 
 
 def r2_client():
@@ -349,11 +531,35 @@ async def run(args):
                 is_photo = True
             _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected, is_photo=is_photo, progress_file=progress_file)
 
-    uploaded = upload_resumable(local_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file)
-    if uploaded["bytes"] != actual_bytes:
-        raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")
-    local_path.unlink(missing_ok=True)
-    return {"object_key": args.object_key, "bytes": actual_bytes, "etag": uploaded["etag"]}
+    is_video = (
+        not is_photo
+        and args.media_variant != "thumbnail"
+        and (
+            clean(args.mime_type).startswith("video/")
+            or bool(re.search(r"\.(mp4|m4v|mov)$", clean(args.original_filename), re.I))
+            or is_mp4_container(local_path)
+        )
+    )
+
+    upload_path = local_path
+    upload_bytes = actual_bytes
+    remux_path = cache / f"{args.asset_id}-{local_name}.faststart.part"
+
+    try:
+        if is_video:
+            print(f"Remuxing MP4 with faststart: {local_path} -> {remux_path}", flush=True)
+            upload_bytes = remux_video_faststart(local_path, remux_path)
+            upload_path = remux_path
+            print(f"Faststart remux successful: {upload_bytes} bytes (moov_before_mdat=True)", flush=True)
+
+        uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file)
+        actual_bytes = upload_bytes
+        if uploaded["bytes"] != actual_bytes:
+            raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")
+        return {"object_key": args.object_key, "bytes": actual_bytes, "etag": uploaded["etag"]}
+    finally:
+        remux_path.unlink(missing_ok=True)
+        local_path.unlink(missing_ok=True)
 
 
 def main():
