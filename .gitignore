@@ -30,5 +30,6 @@ __pycache__/
 build/
 dist/
 reader-manager/dist/
+reader-manager/bin/
 reader-manager/Output/
 YeuNauAnReaderMirror.spec
