@@ -18,7 +18,7 @@ test('1. mirror_v5_r2.py supports --progress-file and reports download and uploa
 
 test('2. Video / document integrity is strictly preserved (size mismatch raises exception)', () => {
   assert.match(worker, /if not is_photo:\s*\n\s*raise RuntimeError\(f"telegram_download_size_mismatch:\{actual\}\/\{total\}"\)/);
-  assert.match(jobs, /if \(!isPhotoOrThumbnail && expectedBytes !== null && expectedBytes > 0 && reportedBytes !== expectedBytes\) \{\s*\n\s*throw new Error\(`v5_mirror_size_mismatch:\$\{reportedBytes\}\/\$\{expectedBytes\}`\);/);
+  assert.match(jobs, /if \(!isPhotoOrThumbnail\(asset\) && expectedBytes !== null && expectedBytes > 0 && reportedBytes !== expectedBytes\) \{\s*\n\s*throw new Error\(`v5_mirror_size_mismatch:\$\{reportedBytes\}\/\$\{expectedBytes\}`\);/);
 });
 
 test('3. Telegram photo size mismatch performs fresh-download validation and unlinks partial cache', () => {
