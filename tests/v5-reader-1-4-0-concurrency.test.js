@@ -104,3 +104,9 @@ test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
   assert.match(jobs, /async function selectMany\(path\) \{/);
   assert.match(jobs, /const runningJobs = await selectMany\(/);
 });
+
+test('14. Benchmark workers can share active local profile via allow_busy=is_benchmark', () => {
+  assert.match(agent, /def ready_profiles\(config, allow_busy=False\):/);
+  assert.match(agent, /def choose_v5_profile\(config, channel, source_id, allow_busy=False\):/);
+  assert.match(agent, /profile = choose_v5_profile\(config, channel, source_id, allow_busy=is_benchmark\)/);
+});
