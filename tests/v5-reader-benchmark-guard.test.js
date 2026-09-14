@@ -7,6 +7,10 @@ const jobs = fs.readFileSync(new URL('../lib/v5-mirror-jobs.js', import.meta.url
 const benchmarkStart = jobs.indexOf('async function finishBenchmarkJob');
 const benchmarkEnd = jobs.indexOf('async function finishOwnedJob');
 const benchmarkFinish = jobs.slice(benchmarkStart, benchmarkEnd);
+const productionValidationStart = jobs.indexOf('function validateReportedMirror');
+const benchmarkValidationStart = jobs.indexOf('function validateReportedBenchmark');
+const productionValidation = jobs.slice(productionValidationStart, benchmarkValidationStart);
+const benchmarkValidation = jobs.slice(benchmarkValidationStart, benchmarkStart);
 
 test('R2 benchmark jobs are opt-in and restricted to the approved isolated prefix', () => {
   assert.match(jobs, /const BENCHMARK_PREFIX = 'benchmarks\/reader-phase1\/20260914\/message-13\/'/);
@@ -34,4 +38,15 @@ test('benchmark completion updates only the benchmark job and never the producti
   assert.doesNotMatch(benchmarkFinish, /finish_v5_telegram_mirror_job/);
   assert.match(jobs, /if \(benchmarkPayload\(job\)\) \{\s*return finishBenchmarkJob/);
   assert.match(jobs, /rpc\/finish_v5_telegram_mirror_job/);
+});
+
+test('benchmark video permits only bounded faststart size drift while production keeps exact video size validation', () => {
+  assert.ok(productionValidationStart >= 0 && benchmarkValidationStart > productionValidationStart);
+  assert.match(productionValidation, /reportedBytes !== expectedBytes/);
+  assert.doesNotMatch(productionValidation, /maxFaststartDrift/);
+
+  assert.match(benchmarkValidation, /Math\.max\(1024 \* 1024, Math\.ceil\(expectedBytes \* 0\.01\)\)/);
+  assert.match(benchmarkValidation, /Math\.abs\(reportedBytes - expectedBytes\) > maxFaststartDrift/);
+  assert.match(benchmarkValidation, /v5_mirror_benchmark_size_drift_excessive/);
+  assert.match(benchmarkFinish, /source_expected_bytes: sourceExpectedBytes/);
 });
