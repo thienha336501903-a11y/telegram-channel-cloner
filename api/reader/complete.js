@@ -106,7 +106,10 @@ export default async function handler(req, res) {
       jobId: body.job_id,
       agentId,
       progressCurrent: safeProgress(body.progress_current),
-      progressTotal: safeProgress(body.progress_total)
+      progressTotal: safeProgress(body.progress_total),
+      progressStage: typeof body.progress_stage === 'string' ? body.progress_stage : null,
+      bytesPerSecond: safeProgress(body.bytes_per_second),
+      etaSeconds: safeProgress(body.eta_seconds)
     });
     if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
     return json(res, 200, { ok: true, job });
@@ -122,7 +125,8 @@ export default async function handler(req, res) {
         objectKey: body.object_key,
         bytes: safeProgress(body.bytes),
         etag: body.etag,
-        error: body.error
+        error: body.error,
+        telemetry: body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry) ? body.telemetry : null
       });
       if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
       return json(res, 200, { ok: true, job });
