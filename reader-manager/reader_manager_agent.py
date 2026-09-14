@@ -92,10 +92,13 @@ async def verify_access(profile, channel):
         await resolve_channel(client, channel)
 
 
-def ready_profiles(config):
+def ready_profiles(config, allow_busy=False):
     return [
         profile for profile in config.get("profiles", [])
-        if profile.get("id") and profile.get("session") and str(profile.get("status") or "ready") == "ready"
+        if profile.get("id") and profile.get("session") and (
+            str(profile.get("status") or "ready") == "ready"
+            or (allow_busy and str(profile.get("status") or "ready") == "busy")
+        )
     ]
 
 
@@ -118,10 +121,10 @@ def invalidate_source_access_cache(source_id=None, channel=None, profile_id=None
         _SOURCE_ACCESS_CACHE.pop(k, None)
 
 
-def choose_v5_profile(config, channel, source_id):
+def choose_v5_profile(config, channel, source_id, allow_busy=False):
     import asyncio
     now = time.time()
-    for profile in ready_profiles(config):
+    for profile in ready_profiles(config, allow_busy=allow_busy):
         profile_id = str(profile.get("id") or "")
         cache_key = (str(source_id), str(channel), profile_id)
         if cache_key in _SOURCE_ACCESS_CACHE and (now - _SOURCE_ACCESS_CACHE[cache_key]) < SOURCE_ACCESS_CACHE_TTL:
@@ -194,7 +197,8 @@ def run_job(config, job, stop_event, status_callback=None):
         raise RuntimeError("reader_job_missing_identity")
 
     if job_type == "v5_mirror":
-        profile = choose_v5_profile(config, channel, source_id)
+        is_benchmark = bool(job.get("benchmark"))
+        profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
         if not profile:
             api(config, "v5-mirror-finish", {"job_id": job_id, "ok": False, "error": "reader_source_access_denied"})
             raise RuntimeError("reader_source_access_denied")
@@ -526,9 +530,9 @@ def start_mirror_job(config, job, stop_event, status_callback=None):
         raise RuntimeError("reader_job_missing_identity")
     channel = str(job.get("channel_ref") or "").strip()
     source_id = str(job.get("source_id") or "")
-    profile = choose_v5_profile(config, channel, source_id)
-    profile_id = str(profile["id"]) if profile else ""
     is_benchmark = bool(job.get("benchmark"))
+    profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
+    profile_id = str(profile["id"]) if profile else ""
 
     thread = threading.Thread(
         target=mirror_worker,
