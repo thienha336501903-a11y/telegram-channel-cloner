@@ -75,6 +75,6 @@ test('10. Heartbeat reports active byte progress every ~2.5 seconds for v5_mirro
 });
 
 test('11. APP_VERSION bumped to 1.3.x across reader_manager_agent and installer', () => {
-  assert.match(agent, /APP_VERSION = "1\.3\.[123]"/);
-  assert.match(installer, /#define MyAppVersion "1\.3\.[123]"/);
+  assert.match(agent, /APP_VERSION = "1\.3\.[1234]"/);
+  assert.match(installer, /#define MyAppVersion "1\.3\.[1234]"/);
 });

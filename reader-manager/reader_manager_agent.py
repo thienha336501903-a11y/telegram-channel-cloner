@@ -16,7 +16,7 @@ from telethon.sessions import StringSession
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -150,6 +150,24 @@ def progress_info(path):
         return None, None, None
 
 
+def progress_telemetry(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return {}
+        return {
+            "current": int(value.get("current", 0)) if "current" in value else None,
+            "total": int(value.get("total")) if value.get("total") is not None else None,
+            "stage": str(value.get("stage") or "") or None,
+            "bytes_per_second": int(value.get("bytes_per_second", 0)) if value.get("bytes_per_second") is not None else None,
+            "mb_per_second": float(value.get("mb_per_second", 0)) if value.get("mb_per_second") is not None else None,
+            "eta_seconds": float(value.get("eta_seconds", 0)) if value.get("eta_seconds") is not None else None,
+            "percent": float(value.get("percent", 0)) if value.get("percent") is not None else None,
+        }
+    except Exception:
+        return {}
+
+
 def worker_result(path):
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -235,6 +253,8 @@ def run_job(config, job, stop_event, status_callback=None):
                     "--media-variant", str(job.get("media_variant") or "media"),
                     "--progress-file", str(progress_file),
                     "--result-file", str(result_file),
+                    "--attempt", str(int(job.get("attempt") or 0)),
+                    "--start-time", str(time.time()),
                 ]
                 stage = "mirroring_r2"
             else:
@@ -267,16 +287,25 @@ def run_job(config, job, stop_event, status_callback=None):
                 if now_ts - last_heartbeat >= heartbeat_interval:
                     if job_type == "v5_mirror":
                         current, total, stage = progress_info(progress_file)
+                        telem = progress_telemetry(progress_file)
                         payload = {"job_id": job_id}
                         if current is not None:
                             payload["progress_current"] = current
                         if total is not None:
                             payload["progress_total"] = total
+                        if telem.get("stage"):
+                            payload["progress_stage"] = telem["stage"]
+                        if telem.get("bytes_per_second") is not None:
+                            payload["bytes_per_second"] = telem["bytes_per_second"]
+                        if telem.get("eta_seconds") is not None:
+                            payload["eta_seconds"] = telem["eta_seconds"]
                         api(config, "v5-mirror-heartbeat", payload, timeout=20)
                         if status_callback:
-                            stage_desc = "Đang tải Telegram" if stage == "telegram_download" else ("Đang upload R2" if stage == "r2_upload" else "Đang sao lưu media V5")
+                            stage_desc = "Đang tải Telegram" if stage == "telegram_download" else ("Đang upload R2" if stage == "r2_upload" else ("Đang xử lý Faststart" if stage == "faststart_remux" else "Đang sao lưu media V5"))
                             detail_str = f" ({current // 1048576} MB / {total // 1048576} MB)" if (current and total) else ""
-                            status_callback(f"{stage_desc}{detail_str} từ {channel}")
+                            rate_str = f" @ {telem['mb_per_second']} MB/s" if telem.get("mb_per_second") else ""
+                            eta_str = f" · còn {int(telem['eta_seconds'])}s" if telem.get("eta_seconds") else ""
+                            status_callback(f"{stage_desc}{detail_str}{rate_str}{eta_str} từ {channel}")
                     else:
                         current, total = progress_value(progress_file)
                         payload = {"job_id": job_id}
@@ -311,6 +340,12 @@ def run_job(config, job, stop_event, status_callback=None):
                     completion["bytes"] = bytes_value
                 completion["etag"] = str(result.get("etag") or "")[:300]
             api(config, "v5-mirror-finish", completion)
+            telem = result.get("telemetry") or {}
+            timings = telem.get("timings_ms") or {}
+            if ok:
+                print(f"V5 mirror job {job_id} succeeded in {telem.get('total_worker_time_ms', 0)}ms. Timings: {timings}", flush=True)
+            else:
+                print(f"V5 mirror job {job_id} failed: {error}. Timings: {timings}", flush=True)
         else:
             ok = code == 0
             message_count = current if job_type == "import" and current is not None else result.get("indexed_message_count")
