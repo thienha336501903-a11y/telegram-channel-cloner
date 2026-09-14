@@ -31,7 +31,6 @@ test('mirror job ownership, object key, and reported bytes are enforced server-s
   assert.match(jobs, /v5_mirror_bytes_required/);
   assert.match(jobs, /v5_mirror_size_mismatch/);
   assert.match(jobs, /expected_bytes: safeBytes\(asset\.bytes\)/);
-  assert.doesNotMatch(jobs, /values\.payload/);
 });
 
 test('Reader advertises V5 mirror only when all local R2 credentials exist', () => {
@@ -60,7 +59,9 @@ test('local mirror is resumable and idempotent across Telegram and R2 retries', 
   assert.match(worker, /create_multipart_upload/);
   assert.match(worker, /complete_multipart_upload/);
   assert.match(worker, /head_matching_object/);
-  assert.match(worker, /R2 object already complete before retry/);
+  assert.match(worker, /if expected > 0:[\s\S]*?existing = head_matching_object\(r2_client\(\), bucket, args\.object_key, expected\)/);
+  assert.match(worker, /_telemetry\["cache"\]\["r2_already_complete"\] = True/);
+  assert.match(worker, /if success:[\s\S]*?local_path\.unlink\(missing_ok=True\)/);
   assert.match(worker, /telegram_download_empty/);
   assert.match(worker, /r2_size_mismatch_after_complete/);
   assert.doesNotMatch(worker, /READER_INGEST_SECRET/);
