@@ -10,7 +10,7 @@ const build = read('reader-manager/build.ps1');
 const installer = read('reader-manager/installer.iss');
 
 test('managed Windows Reader claims V5 mirror only with encrypted local R2 config', () => {
-  assert.match(agent, /APP_VERSION = "1\.3\.[0-9]+"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.0"/);
   assert.match(agent, /V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"/);
   assert.match(agent, /def has_v5_r2_config\(config\):/);
   assert.match(agent, /if has_v5_r2_config\(config\):[\s\S]*values\.append\(V5_MIRROR_CAPABILITY\)/);
@@ -28,7 +28,7 @@ test('managed Reader verifies Telegram source access before mirroring', () => {
   assert.match(agent, /asyncio\.run\(verify_access\(profile, channel\)\)/);
   assert.match(agent, /"source-access"/);
   assert.match(agent, /reader_source_access_denied/);
-  assert.match(agent, /profile\.get\("status"\).*== "ready"/s);
+  assert.match(agent, /status == "ready" or \(status == "busy" && profile_active_count\(profile_id\) > 0\)/);
 });
 
 test('R2 credentials are entered in GUI and persisted through DPAPI config only', () => {
@@ -43,7 +43,7 @@ test('R2 credentials are entered in GUI and persisted through DPAPI config only'
 test('Windows installer ships the dedicated R2 mirror executable', () => {
   assert.match(build, /--name YeuNauAnReaderMirror reader-cli\/mirror_v5_r2\.py/);
   assert.match(build, /Copy-Item -Force dist\/YeuNauAnReaderMirror\.exe/);
-  assert.match(installer, /MyAppVersion "1\.3\.[0-9]+"/);
+  assert.match(installer, /MyAppVersion "1\.4\.0"/);
   assert.match(installer, /YeuNauAnReaderMirror\.exe/);
   assert.match(installer, /PrivilegesRequired=lowest/);
 });
