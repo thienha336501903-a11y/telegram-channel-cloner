@@ -99,3 +99,8 @@ test('12. Existing Reader config from 1.3.4 loads seamlessly in 1.4.0', () => {
   assert.match(agent, /APP_VERSION = "1\.4\.0"/);
   assert.match(installer, /#define MyAppVersion "1\.4\.0"/);
 });
+
+test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
+  assert.match(jobs, /async function selectMany\(path\) \{/);
+  assert.match(jobs, /const runningJobs = await selectMany\(/);
+});
