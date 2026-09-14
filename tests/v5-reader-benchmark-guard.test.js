@@ -80,9 +80,10 @@ test('benchmark finish merges and preserves existing heartbeat telemetry in resu
   assert.match(benchmarkFinish, /\.\.\.\(finalTelemetry \? \{ telemetry: finalTelemetry \} : \{\}\)/);
 });
 
-test('concurrency strictly remains 1 across claim and execution', () => {
+test('production concurrency strictly remains 1 and benchmark concurrency capped at 2', () => {
   const agentScript = fs.readFileSync(new URL('../reader-manager/reader_manager_agent.py', import.meta.url), 'utf8');
   assert.doesNotMatch(agentScript, /ThreadPoolExecutor|ProcessPoolExecutor|asyncio\.gather/);
   assert.match(agentScript, /def run_job\(config, job,/);
-  assert.match(agentScript, /while not stop_event\.is_set\(\):[\s\S]*job = claim_next_job\(config\)[\s\S]*if job:[\s\S]*run_job\(config, job,/);
+  assert.match(agentScript, /if has_prod:\s*\n\s*return False, None/);
+  assert.match(agentScript, /if total >= 2 or benchmark_count >= 2:\s*\n\s*return False, None/);
 });
