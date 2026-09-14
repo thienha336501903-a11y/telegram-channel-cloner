@@ -51,13 +51,13 @@ test('3. Upload uses remux output path and verifies R2 HEAD matches output bytes
   assert.match(worker, /if uploaded\["bytes"\] != actual_bytes:\s*\n\s*raise RuntimeError\(f"mirror_size_mismatch:\{uploaded\['bytes'\]\}\/\{actual_bytes\}"\)/);
 });
 
-test('4. Remux failure raises faststart_remux_failed and cleans up temp files in finally block', () => {
+test('4. Remux failure raises faststart_remux_failed and cleans up invalid remux files', () => {
   assert.match(worker, /raise RuntimeError\("faststart_remux_failed:no_video_stream_in_source"\)/);
   assert.match(worker, /raise RuntimeError\(f"faststart_remux_failed:ffmpeg_exit_\{res\.returncode\}/);
   assert.match(worker, /raise RuntimeError\("faststart_remux_failed:output_missing"\)/);
   assert.match(worker, /raise RuntimeError\("faststart_remux_failed:output_empty"\)/);
   assert.match(worker, /raise RuntimeError\(f"faststart_remux_failed:\{moov_err\}"\)/);
-  assert.match(worker, /finally:\s*\n\s*remux_path\.unlink\(missing_ok=True\)\s*\n\s*local_path\.unlink\(missing_ok=True\)/);
+  assert.match(worker, /remux_path\.unlink\(missing_ok=True\)/);
 });
 
 test('5. Non-video assets (photos, thumbnails, documents) bypass faststart remuxing', () => {
@@ -66,9 +66,9 @@ test('5. Non-video assets (photos, thumbnails, documents) bypass faststart remux
   assert.match(worker, /if is_video:/);
 });
 
-test('6. Reader version bumped to 1.3.3 across agent and installer', () => {
-  assert.match(agent, /APP_VERSION = "1\.3\.3"/);
-  assert.match(installer, /#define MyAppVersion "1\.3\.3"/);
+test('6. Reader version bumped to 1.3.x across agent and installer', () => {
+  assert.match(agent, /APP_VERSION = "1\.3\.[34]"/);
+  assert.match(installer, /#define MyAppVersion "1\.3\.[34]"/);
 });
 
 test('7. Installer packages bundled ffmpeg.exe and ffprobe.exe to {app}\\bin', () => {

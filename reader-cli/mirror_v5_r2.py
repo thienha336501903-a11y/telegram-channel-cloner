@@ -37,6 +37,9 @@ except ImportError:
 
 PART_SIZE = 16 * 1024 * 1024
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
+SMALL_OBJECT_THRESHOLD_BYTES = 8 * 1024 * 1024
+CACHE_TTL_SECONDS = 24 * 60 * 60
+MAX_CACHE_BYTES = 10 * 1024 * 1024 * 1024
 
 
 def clean(value):
@@ -79,11 +82,44 @@ def read_json(path):
         return {}
 
 
+class StageTimer:
+    """Track per-stage elapsed timings in milliseconds without exposing sensitive data."""
+
+    def __init__(self, start_time=None):
+        self.base_time = float(start_time) if start_time else time.time()
+        self.timings = {}
+        self._active_stage = None
+        self._stage_start = None
+
+    def start_stage(self, stage):
+        now = time.time()
+        if self._active_stage:
+            self.end_stage(self._active_stage)
+        self._active_stage = stage
+        self._stage_start = now
+
+    def end_stage(self, stage=None):
+        now = time.time()
+        st = stage or self._active_stage
+        if st and self._stage_start is not None:
+            elapsed = max(0, int((now - self._stage_start) * 1000))
+            self.timings[st] = self.timings.get(st, 0) + elapsed
+        self._active_stage = None
+        self._stage_start = None
+
+    def record_elapsed(self, stage, elapsed_ms):
+        self.timings[stage] = int(elapsed_ms)
+
+    def total_elapsed_ms(self):
+        return max(0, int((time.time() - self.base_time) * 1000))
+
+
 _last_progress_time = 0
+_STAGE_PROGRESS = {}
 
 
 def report_progress(progress_file, stage, current, total):
-    global _last_progress_time
+    global _last_progress_time, _STAGE_PROGRESS
     if not progress_file:
         return
     now = time.time()
@@ -93,10 +129,46 @@ def report_progress(progress_file, stage, current, total):
     if not is_done and (now - _last_progress_time) < 0.8:
         return
     _last_progress_time = now
+
+    # Calculate rolling / instantaneous rate and ETA
+    if _STAGE_PROGRESS.get("stage") != stage:
+        _STAGE_PROGRESS = {
+            "stage": stage,
+            "start_time": now,
+            "last_time": now,
+            "last_bytes": curr_int,
+            "rate": 0,
+        }
+    else:
+        interval = now - _STAGE_PROGRESS["last_time"]
+        if interval >= 0.5:
+            instant_rate = (curr_int - _STAGE_PROGRESS["last_bytes"]) / max(0.001, interval)
+            _STAGE_PROGRESS["last_time"] = now
+            _STAGE_PROGRESS["last_bytes"] = curr_int
+            _STAGE_PROGRESS["rate"] = max(0, int(instant_rate))
+        elif (now - _STAGE_PROGRESS["start_time"]) > 0:
+            _STAGE_PROGRESS["rate"] = max(0, int(curr_int / max(0.001, now - _STAGE_PROGRESS["start_time"])))
+
+    bytes_per_sec = _STAGE_PROGRESS.get("rate", 0)
+    eta_sec = None
+    if total_int and total_int > curr_int and bytes_per_sec > 0:
+        eta_sec = round((total_int - curr_int) / bytes_per_sec, 1)
+
+    percent = None
+    if total_int and total_int > 0:
+        percent = round(min(100.0, (curr_int / total_int) * 100), 1)
+
+    elapsed_ms = max(0, int((now - _STAGE_PROGRESS.get("start_time", now)) * 1000))
+
     payload = {
         "stage": stage,
         "current": curr_int,
         "total": total_int,
+        "bytes_per_second": bytes_per_sec,
+        "mb_per_second": round(bytes_per_sec / (1024 * 1024), 2),
+        "eta_seconds": eta_sec,
+        "percent": percent,
+        "elapsed_ms": elapsed_ms,
     }
     try:
         atomic_json(Path(progress_file), payload)
@@ -254,15 +326,25 @@ def probe_media(file_path, ffprobe_bin=None):
         raise RuntimeError(f"ffprobe_json_parse_error:{exc}")
 
 
+_ACTIVE_TIMER = None
+
+
 def remux_video_faststart(input_path, output_path):
     ffmpeg_bin = get_ffmpeg_bin()
     ffprobe_bin = get_ffprobe_bin()
+    timer = _ACTIVE_TIMER
+    if timer:
+        timer.start_stage("faststart_source_probe")
     try:
         source_probe = probe_media(input_path, ffprobe_bin=ffprobe_bin)
     except Exception as exc:
         if "faststart_dependency_missing" in str(exc):
             raise
         raise RuntimeError(f"faststart_remux_failed:source_probe_failed:{exc}") from exc
+    finally:
+        if timer:
+            timer.end_stage("faststart_source_probe")
+
     source_streams = source_probe.get("streams", [])
     source_video = [s for s in source_streams if s.get("codec_type") == "video"]
     source_audio = [s for s in source_streams if s.get("codec_type") == "audio"]
@@ -283,6 +365,9 @@ def remux_video_faststart(input_path, output_path):
     popen_kwargs = {}
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    if timer:
+        timer.start_stage("faststart_remux")
     res = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -291,6 +376,9 @@ def remux_video_faststart(input_path, output_path):
         timeout=180,
         **popen_kwargs,
     )
+    if timer:
+        timer.end_stage("faststart_remux")
+
     if res.returncode != 0:
         raise RuntimeError(f"faststart_remux_failed:ffmpeg_exit_{res.returncode}:{clean(res.stderr)[:200]}")
 
@@ -301,38 +389,44 @@ def remux_video_faststart(input_path, output_path):
     if out_size <= 0:
         raise RuntimeError("faststart_remux_failed:output_empty")
 
-    moov_ok, moov_err = check_moov_before_mdat(output_path)
-    if not moov_ok:
-        raise RuntimeError(f"faststart_remux_failed:{moov_err}")
-
+    if timer:
+        timer.start_stage("faststart_output_probe_verify")
     try:
-        output_probe = probe_media(output_path, ffprobe_bin=ffprobe_bin)
-    except Exception as exc:
-        if "faststart_dependency_missing" in str(exc):
-            raise
-        raise RuntimeError(f"faststart_remux_failed:output_probe_failed:{exc}") from exc
-    output_streams = output_probe.get("streams", [])
-    output_video = [s for s in output_streams if s.get("codec_type") == "video"]
-    output_audio = [s for s in output_streams if s.get("codec_type") == "audio"]
+        moov_ok, moov_err = check_moov_before_mdat(output_path)
+        if not moov_ok:
+            raise RuntimeError(f"faststart_remux_failed:{moov_err}")
 
-    if not output_video:
-        raise RuntimeError("faststart_remux_failed:output_video_stream_missing")
-    if clean(output_video[0].get("codec_name")) != clean(source_video[0].get("codec_name")):
-        raise RuntimeError(f"faststart_remux_failed:video_codec_mismatch:{output_video[0].get('codec_name')}_vs_{source_video[0].get('codec_name')}")
+        try:
+            output_probe = probe_media(output_path, ffprobe_bin=ffprobe_bin)
+        except Exception as exc:
+            if "faststart_dependency_missing" in str(exc):
+                raise
+            raise RuntimeError(f"faststart_remux_failed:output_probe_failed:{exc}") from exc
+        output_streams = output_probe.get("streams", [])
+        output_video = [s for s in output_streams if s.get("codec_type") == "video"]
+        output_audio = [s for s in output_streams if s.get("codec_type") == "audio"]
 
-    if source_audio:
-        if not output_audio:
-            raise RuntimeError("faststart_remux_failed:output_audio_stream_missing")
-        if clean(output_audio[0].get("codec_name")) != clean(source_audio[0].get("codec_name")):
-            raise RuntimeError(f"faststart_remux_failed:audio_codec_mismatch:{output_audio[0].get('codec_name')}_vs_{source_audio[0].get('codec_name')}")
+        if not output_video:
+            raise RuntimeError("faststart_remux_failed:output_video_stream_missing")
+        if clean(output_video[0].get("codec_name")) != clean(source_video[0].get("codec_name")):
+            raise RuntimeError(f"faststart_remux_failed:video_codec_mismatch:{output_video[0].get('codec_name')}_vs_{source_video[0].get('codec_name')}")
 
-    try:
-        src_dur = float(source_probe.get("format", {}).get("duration") or 0)
-        out_dur = float(output_probe.get("format", {}).get("duration") or 0)
-        if src_dur > 0 and out_dur > 0 and abs(src_dur - out_dur) > 0.5:
-            raise RuntimeError(f"faststart_remux_failed:duration_drift:{abs(src_dur - out_dur):.2f}s")
-    except (ValueError, TypeError):
-        pass
+        if source_audio:
+            if not output_audio:
+                raise RuntimeError("faststart_remux_failed:output_audio_stream_missing")
+            if clean(output_audio[0].get("codec_name")) != clean(source_audio[0].get("codec_name")):
+                raise RuntimeError(f"faststart_remux_failed:audio_codec_mismatch:{output_audio[0].get('codec_name')}_vs_{source_audio[0].get('codec_name')}")
+
+        try:
+            src_dur = float(source_probe.get("format", {}).get("duration") or 0)
+            out_dur = float(output_probe.get("format", {}).get("duration") or 0)
+            if src_dur > 0 and out_dur > 0 and abs(src_dur - out_dur) > 0.5:
+                raise RuntimeError(f"faststart_remux_failed:duration_drift:{abs(src_dur - out_dur):.2f}s")
+        except (ValueError, TypeError):
+            pass
+    finally:
+        if timer:
+            timer.end_stage("faststart_output_probe_verify")
 
     return out_size
 
@@ -354,6 +448,124 @@ def cache_root():
     root = Path(configured) if configured else Path(__file__).resolve().parent / ".v5-r2-cache"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def cache_manifest_path(asset_id):
+    return cache_root() / f"{asset_id}.cache.json"
+
+
+def save_cache_manifest(asset_id, data):
+    manifest_path = cache_manifest_path(asset_id)
+    existing = read_json(manifest_path)
+    existing.update(data)
+    existing["asset_id"] = str(asset_id)
+    existing["updated_at"] = time.time()
+    atomic_json(manifest_path, existing)
+
+
+def load_cache_manifest(asset_id):
+    return read_json(cache_manifest_path(asset_id))
+
+
+def can_reuse_download_cache(local_path, manifest, channel, message_id, expected_bytes, is_photo):
+    if not local_path.exists():
+        return False
+    size = local_path.stat().st_size
+    if size <= 0:
+        return False
+    if manifest.get("channel") != str(channel):
+        return False
+    if int(manifest.get("message_id") or 0) != int(message_id):
+        return False
+    if int(manifest.get("download_size") or 0) != size:
+        return False
+    if expected_bytes and not is_photo and size != int(expected_bytes):
+        return False
+    return True
+
+
+def can_reuse_faststart_cache(remux_path, manifest, channel, message_id):
+    if not remux_path.exists():
+        return False
+    size = remux_path.stat().st_size
+    if size <= 0:
+        return False
+    if manifest.get("channel") != str(channel):
+        return False
+    if int(manifest.get("message_id") or 0) != int(message_id):
+        return False
+    if int(manifest.get("faststart_size") or 0) != size:
+        return False
+    if not manifest.get("faststart_verified"):
+        return False
+    try:
+        moov_ok, _ = check_moov_before_mdat(remux_path)
+        return moov_ok
+    except Exception:
+        return False
+
+
+def clean_asset_cache(asset_id, local_name):
+    cache = cache_root()
+    (cache / f"{asset_id}-{local_name}.part").unlink(missing_ok=True)
+    (cache / f"{asset_id}-{local_name}.faststart.part").unlink(missing_ok=True)
+    (cache / f"{asset_id}.r2.json").unlink(missing_ok=True)
+    (cache / f"{asset_id}.cache.json").unlink(missing_ok=True)
+
+
+def run_cache_gc(cache_dir=None, active_asset_ids=None, max_age_seconds=CACHE_TTL_SECONDS, max_bytes=MAX_CACHE_BYTES):
+    cache = Path(cache_dir) if cache_dir else cache_root()
+    if not cache.exists():
+        return {"evicted_count": 0, "evicted_bytes": 0}
+    active_set = {str(a) for a in (active_asset_ids or []) if a}
+    now = time.time()
+    files = []
+    total_size = 0
+    for p in cache.iterdir():
+        if not p.is_file():
+            continue
+        is_active = any(p.name.startswith(f"{active_id}-") or p.name.startswith(f"{active_id}.") for active_id in active_set)
+        if is_active:
+            continue
+        try:
+            stat = p.stat()
+            files.append({"path": p, "size": stat.st_size, "mtime": stat.st_mtime})
+            total_size += stat.st_size
+        except OSError:
+            pass
+
+    evicted_count = 0
+    evicted_bytes = 0
+
+    # 1. Evict files older than max_age_seconds
+    remaining_files = []
+    for f in files:
+        if (now - f["mtime"]) > max_age_seconds:
+            try:
+                f["path"].unlink(missing_ok=True)
+                evicted_count += 1
+                evicted_bytes += f["size"]
+                total_size -= f["size"]
+            except OSError:
+                pass
+        else:
+            remaining_files.append(f)
+
+    # 2. If remaining size exceeds max_bytes, evict oldest first
+    if total_size > max_bytes:
+        remaining_files.sort(key=lambda x: x["mtime"])
+        for f in remaining_files:
+            if total_size <= max_bytes:
+                break
+            try:
+                f["path"].unlink(missing_ok=True)
+                evicted_count += 1
+                evicted_bytes += f["size"]
+                total_size -= f["size"]
+            except OSError:
+                pass
+
+    return {"evicted_count": evicted_count, "evicted_bytes": evicted_bytes, "remaining_bytes": total_size}
 
 
 def message_size(message):
@@ -381,7 +593,10 @@ def head_matching_object(client, bucket, key, expected_bytes):
 
 
 async def download_resumable(client, entity, message_id, target, expected_bytes=0, is_photo=False, progress_file=None):
-    message = await client.get_messages(entity, ids=int(message_id))
+    if hasattr(message_id, "media"):
+        message = message_id
+    else:
+        message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
         raise RuntimeError("telegram_media_message_missing")
 
@@ -433,7 +648,10 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
 
 
 async def download_thumbnail(client, entity, message_id, target, expected_bytes=0, progress_file=None):
-    message = await client.get_messages(entity, ids=int(message_id))
+    if hasattr(message_id, "media"):
+        message = message_id
+    else:
+        message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
         raise RuntimeError("telegram_media_message_missing")
     expected = int(expected_bytes or 0)
@@ -492,7 +710,35 @@ def load_or_create_checkpoint(client, bucket, key, content_type, checkpoint_path
     return create_checkpoint(client, bucket, key, content_type, checkpoint_path)
 
 
-def upload_resumable(local_path, object_key, asset_id, content_type, progress_file=None):
+def upload_small_object(client, bucket, key, local_path, content_type, progress_file=None, timer=None):
+    """Fast single PUT path for small objects (< 8 MiB)."""
+    total_bytes = local_path.stat().st_size
+    with local_path.open("rb") as handle:
+        data = handle.read()
+    if timer:
+        timer.start_stage("r2_upload")
+    response = client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=data,
+        ContentType=content_type or "application/octet-stream",
+    )
+    etag = clean(response.get("ETag"))
+    if timer:
+        timer.end_stage("r2_upload")
+
+    if timer:
+        timer.start_stage("r2_final_head_verify")
+    head = head_matching_object(client, bucket, key, total_bytes)
+    if timer:
+        timer.end_stage("r2_final_head_verify")
+    if not head:
+        raise RuntimeError("r2_size_mismatch_after_complete")
+    report_progress(progress_file, "r2_upload", total_bytes, total_bytes)
+    return {"bytes": total_bytes, "etag": etag or head.get("etag"), "upload_method": "put_object"}
+
+
+def upload_resumable(local_path, object_key, asset_id, content_type, progress_file=None, timer=None):
     bucket = bucket_name()
     client = r2_client()
     checkpoint_path = cache_root() / f"{asset_id}.r2.json"
@@ -500,18 +746,29 @@ def upload_resumable(local_path, object_key, asset_id, content_type, progress_fi
     if total_bytes <= 0:
         raise RuntimeError("mirror_local_file_empty")
 
+    if timer:
+        timer.start_stage("r2_preflight_head")
     existing = head_matching_object(client, bucket, object_key, total_bytes)
+    if timer:
+        timer.end_stage("r2_preflight_head")
     if existing:
         checkpoint_path.unlink(missing_ok=True)
         report_progress(progress_file, "r2_upload", total_bytes, total_bytes)
         print(f"R2 object already complete: {total_bytes} bytes", flush=True)
         return existing
 
+    # Small object fast path (< 8 MiB) avoids 3-step multipart overhead
+    if total_bytes < SMALL_OBJECT_THRESHOLD_BYTES:
+        checkpoint_path.unlink(missing_ok=True)
+        return upload_small_object(client, bucket, object_key, local_path, content_type, progress_file=progress_file, timer=timer)
+
     checkpoint = load_or_create_checkpoint(client, bucket, object_key, content_type, checkpoint_path)
     upload_id = checkpoint["upload_id"]
     completed = {int(number): etag for number, etag in (checkpoint.get("parts") or {}).items() if clean(etag)}
     total_parts = max(1, math.ceil(total_bytes / PART_SIZE))
 
+    if timer:
+        timer.start_stage("r2_upload")
     with local_path.open("rb") as handle:
         for part_number in range(1, total_parts + 1):
             if part_number in completed:
@@ -538,23 +795,37 @@ def upload_resumable(local_path, object_key, asset_id, content_type, progress_fi
             uploaded_bytes = min(part_number * PART_SIZE, total_bytes)
             report_progress(progress_file, "r2_upload", uploaded_bytes, total_bytes)
             print(f"R2 upload part {part_number}/{total_parts}", flush=True)
+    if timer:
+        timer.end_stage("r2_upload")
 
     parts = [{"PartNumber": number, "ETag": completed[number]} for number in range(1, total_parts + 1)]
+    if timer:
+        timer.start_stage("r2_complete")
     client.complete_multipart_upload(
         Bucket=bucket,
         Key=object_key,
         UploadId=upload_id,
         MultipartUpload={"Parts": parts},
     )
+    if timer:
+        timer.end_stage("r2_complete")
+
+    if timer:
+        timer.start_stage("r2_final_head_verify")
     head = head_matching_object(client, bucket, object_key, total_bytes)
+    if timer:
+        timer.end_stage("r2_final_head_verify")
     if not head:
         raise RuntimeError("r2_size_mismatch_after_complete")
     checkpoint_path.unlink(missing_ok=True)
     report_progress(progress_file, "r2_upload", total_bytes, total_bytes)
+    head["upload_method"] = "multipart"
     return head
 
 
-async def run(args):
+async def run(args, timer=None):
+    global _ACTIVE_TIMER
+    _ACTIVE_TIMER = timer
     if not args.api_id or not args.api_hash:
         raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
     require_env("R2_ACCOUNT_ID")
@@ -565,20 +836,38 @@ async def run(args):
     cache = cache_root()
     local_name = safe_name(args.original_filename)
     local_path = cache / f"{args.asset_id}-{local_name}.part"
+    remux_path = cache / f"{args.asset_id}-{local_name}.faststart.part"
     checkpoint_path = cache / f"{args.asset_id}.r2.json"
     expected = int(args.expected_bytes or 0)
     progress_file = getattr(args, "progress_file", None)
+    cache_reused = "none"
 
+    if timer:
+        timer.start_stage("r2_preflight_head")
     # If R2 was already completed but the finish callback was lost, a retry can
     # acknowledge the existing object without downloading Telegram again.
     if expected > 0:
         existing = head_matching_object(r2_client(), bucket, args.object_key, expected)
+        if timer:
+            timer.end_stage("r2_preflight_head")
         if existing:
-            local_path.unlink(missing_ok=True)
-            checkpoint_path.unlink(missing_ok=True)
+            clean_asset_cache(args.asset_id, local_name)
             report_progress(progress_file, "r2_upload", expected, expected)
             print(f"R2 object already complete before retry: {expected} bytes", flush=True)
-            return {"object_key": args.object_key, "bytes": existing["bytes"], "etag": existing["etag"]}
+            return {
+                "object_key": args.object_key,
+                "bytes": existing["bytes"],
+                "etag": existing["etag"],
+                "telemetry": {
+                    "timings_ms": timer.timings if timer else {},
+                    "upload_method": "preflight_shortcircuit",
+                    "faststart_remuxed": False,
+                    "cache_reused": "r2_complete",
+                    "attempt": int(getattr(args, "attempt", 0) or 0),
+                },
+            }
+    elif timer:
+        timer.end_stage("r2_preflight_head")
 
     is_photo = (
         args.media_variant == "thumbnail"
@@ -586,15 +875,53 @@ async def run(args):
         or bool(re.search(r"\.(jpe?g|png|webp|gif)$", clean(args.original_filename), re.I))
     )
 
-    async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
-        entity = await resolve_channel(client, args.channel)
-        if args.media_variant == "thumbnail":
-            _, actual_bytes = await download_thumbnail(client, entity, args.message_id, local_path, expected, progress_file=progress_file)
-        else:
+    manifest = load_cache_manifest(args.asset_id)
+    reused_download = can_reuse_download_cache(local_path, manifest, args.channel, args.message_id, expected, is_photo)
+
+    if reused_download:
+        actual_bytes = local_path.stat().st_size
+        report_progress(progress_file, "telegram_download", actual_bytes, actual_bytes)
+        print(f"Reusing existing downloaded Telegram media cache: {actual_bytes} bytes", flush=True)
+        cache_reused = "telegram_download"
+    else:
+        if timer:
+            timer.start_stage("telegram_connect")
+        async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
+            if timer:
+                timer.end_stage("telegram_connect")
+
+            if timer:
+                timer.start_stage("telegram_resolve_channel")
+            entity = await resolve_channel(client, args.channel)
+            if timer:
+                timer.end_stage("telegram_resolve_channel")
+
+            if timer:
+                timer.start_stage("telegram_message_fetch")
             message_obj = await client.get_messages(entity, ids=int(args.message_id))
-            if message_obj and (getattr(message_obj, "photo", None) or getattr(getattr(message_obj, "media", None), "photo", None)):
+            if timer:
+                timer.end_stage("telegram_message_fetch")
+
+            if not message_obj or not getattr(message_obj, "media", None):
+                raise RuntimeError("telegram_media_message_missing")
+
+            if getattr(message_obj, "photo", None) or getattr(getattr(message_obj, "media", None), "photo", None):
                 is_photo = True
-            _, actual_bytes = await download_resumable(client, entity, args.message_id, local_path, expected, is_photo=is_photo, progress_file=progress_file)
+
+            if timer:
+                timer.start_stage("telegram_download")
+            if args.media_variant == "thumbnail":
+                _, actual_bytes = await download_thumbnail(client, entity, message_obj, local_path, expected, progress_file=progress_file)
+            else:
+                _, actual_bytes = await download_resumable(client, entity, message_obj, local_path, expected, is_photo=is_photo, progress_file=progress_file)
+            if timer:
+                timer.end_stage("telegram_download")
+
+        save_cache_manifest(args.asset_id, {
+            "channel": str(args.channel),
+            "message_id": int(args.message_id),
+            "download_size": actual_bytes,
+        })
 
     is_video = (
         not is_photo
@@ -608,23 +935,62 @@ async def run(args):
 
     upload_path = local_path
     upload_bytes = actual_bytes
-    remux_path = cache / f"{args.asset_id}-{local_name}.faststart.part"
+    faststart_remuxed = False
 
     try:
         if is_video:
-            print(f"Remuxing MP4 with faststart: {local_path} -> {remux_path}", flush=True)
-            upload_bytes = remux_video_faststart(local_path, remux_path)
-            upload_path = remux_path
-            print(f"Faststart remux successful: {upload_bytes} bytes (moov_before_mdat=True)", flush=True)
+            reused_faststart = can_reuse_faststart_cache(remux_path, manifest, args.channel, args.message_id)
+            if reused_faststart:
+                upload_bytes = remux_path.stat().st_size
+                upload_path = remux_path
+                print(f"Reusing existing verified faststart remux cache: {upload_bytes} bytes", flush=True)
+                cache_reused = "faststart_remux"
+            else:
+                print(f"Remuxing MP4 with faststart: {local_path} -> {remux_path}", flush=True)
+                upload_bytes = remux_video_faststart(local_path, remux_path)
+                upload_path = remux_path
+                faststart_remuxed = True
+                print(f"Faststart remux successful: {upload_bytes} bytes (moov_before_mdat=True)", flush=True)
+                save_cache_manifest(args.asset_id, {
+                    "channel": str(args.channel),
+                    "message_id": int(args.message_id),
+                    "faststart_size": upload_bytes,
+                    "faststart_verified": True,
+                })
 
-        uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file)
+        uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file, timer=timer)
         actual_bytes = upload_bytes
         if uploaded["bytes"] != actual_bytes:
             raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")
-        return {"object_key": args.object_key, "bytes": actual_bytes, "etag": uploaded["etag"]}
+
+        # Success: clean up cache for this completed asset
+        clean_asset_cache(args.asset_id, local_name)
+        run_cache_gc(cache, active_asset_ids=[args.asset_id])
+
+        return {
+            "object_key": args.object_key,
+            "bytes": actual_bytes,
+            "etag": uploaded["etag"],
+            "telemetry": {
+                "timings_ms": timer.timings if timer else {},
+                "total_worker_time_ms": timer.total_elapsed_ms() if timer else 0,
+                "upload_method": uploaded.get("upload_method", "multipart"),
+                "faststart_remuxed": faststart_remuxed,
+                "cache_reused": cache_reused,
+                "attempt": int(getattr(args, "attempt", 0) or 0),
+            },
+        }
+    except Exception as exc:
+        # On retryable failure, invalidate only corrupt files; keep verified partial files
+        if remux_path.exists():
+            moov_ok, _ = check_moov_before_mdat(remux_path) if remux_path.stat().st_size > 0 else (False, None)
+            if not moov_ok:
+                remux_path.unlink(missing_ok=True)
+        if local_path.exists() and local_path.stat().st_size <= 0:
+            local_path.unlink(missing_ok=True)
+        raise
     finally:
-        remux_path.unlink(missing_ok=True)
-        local_path.unlink(missing_ok=True)
+        pass
 
 
 def main():
@@ -642,16 +1008,30 @@ def main():
     parser.add_argument("--media-variant", choices=["media", "thumbnail"], default="media")
     parser.add_argument("--progress-file", default=None)
     parser.add_argument("--result-file", required=True)
+    parser.add_argument("--attempt", type=int, default=0)
+    parser.add_argument("--start-time", type=float, default=None)
     args = parser.parse_args()
+
+    timer = StageTimer(args.start_time)
+    if args.start_time:
+        timer.record_elapsed("worker_process_startup", max(0, int((time.time() - float(args.start_time)) * 1000)))
 
     result_path = Path(args.result_file)
     try:
-        result = asyncio.run(run(args))
+        result = asyncio.run(run(args, timer=timer))
         atomic_json(result_path, {"ok": True, **result})
         print(f"V5 mirror complete: {result['bytes']} bytes → {result['object_key']}")
         return 0
     except Exception as exc:
-        atomic_json(result_path, {"ok": False, "error": str(exc)[:2000]})
+        atomic_json(result_path, {
+            "ok": False,
+            "error": str(exc)[:2000],
+            "telemetry": {
+                "timings_ms": timer.timings,
+                "total_worker_time_ms": timer.total_elapsed_ms(),
+                "attempt": args.attempt,
+            },
+        })
         print(f"V5 mirror failed: {exc}", flush=True)
         return 1
 
