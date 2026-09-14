@@ -2,6 +2,7 @@
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,10 +17,18 @@ from telethon.sessions import StringSession
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.4.0"
 CONTROL_PATH = "/api/reader/complete"
-BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1"]
+BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
+
+_ACTIVE_MIRRORS = {}
+_ACTIVE_MIRRORS_LOCK = threading.Lock()
+_ACTIVE_SUBPROCESSES = {}
+_CONFIG_WRITE_LOCK = threading.Lock()
+_BACKOFF_LOCK = threading.Lock()
+_MIRROR_BACKOFF_UNTIL = 0
+_MIRROR_DEGRADED_UNTIL = 0
 
 
 def api(config, action, payload=None, timeout=45):
@@ -277,6 +286,8 @@ def run_job(config, job, stop_event, status_callback=None):
                 popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
             process = subprocess.Popen(command, env=env, **popen_kwargs)
+            with _ACTIVE_MIRRORS_LOCK:
+                _ACTIVE_SUBPROCESSES[job_id] = process
             last_heartbeat = 0
             while process.poll() is None:
                 if stop_event.is_set():
@@ -324,6 +335,8 @@ def run_job(config, job, stop_event, status_callback=None):
                     last_heartbeat = time.time()
                 time.sleep(1 if job_type == "v5_mirror" else 2)
             code = process.wait()
+            with _ACTIVE_MIRRORS_LOCK:
+                _ACTIVE_SUBPROCESSES.pop(job_id, None)
             result = worker_result(result_file)
             current, total = progress_value(progress_file)
 
@@ -360,19 +373,223 @@ def run_job(config, job, stop_event, status_callback=None):
         if not ok:
             raise RuntimeError(error if job_type == "v5_mirror" else f"{job_type}_exit_{code}")
     finally:
+        with _ACTIVE_MIRRORS_LOCK:
+            _ACTIVE_SUBPROCESSES.pop(job_id, None)
+            _ACTIVE_MIRRORS.pop(job_id, None)
         try:
-            api(config, "profile-status", {"profile_id": profile_id, "status": "ready"})
+            if not is_profile_in_use(profile_id, exclude_job_id=job_id):
+                api(config, "profile-status", {"profile_id": profile_id, "status": "ready"})
         except Exception:
             pass
 
 
-def claim_next_job(config):
+def claim_generic_job(config):
     capabilities = reader_capabilities(config)
     response = api(config, "claim", {"capabilities": capabilities}, timeout=30)
-    job = response.get("job")
-    if job or V5_MIRROR_CAPABILITY not in capabilities:
-        return job
+    return response.get("job")
+
+
+def claim_v5_job(config):
+    capabilities = reader_capabilities(config)
+    if V5_MIRROR_CAPABILITY not in capabilities:
+        return None
     return api(config, "v5-mirror-claim", {"capabilities": capabilities}, timeout=30).get("job")
+
+
+def claim_next_job(config):
+    """Compatibility helper: preserves generic priority."""
+    job = claim_generic_job(config)
+    return job if job else claim_v5_job(config)
+
+
+def is_profile_in_use(profile_id, exclude_job_id=None):
+    if not profile_id:
+        return False
+    with _ACTIVE_MIRRORS_LOCK:
+        for j_id, info in _ACTIVE_MIRRORS.items():
+            if j_id != exclude_job_id and info.get("profile_id") == profile_id:
+                return True
+    return False
+
+
+def active_mirror_stats():
+    with _ACTIVE_MIRRORS_LOCK:
+        total = len(_ACTIVE_MIRRORS)
+        has_prod = any(not info.get("benchmark") for info in _ACTIVE_MIRRORS.values())
+        benchmark_count = sum(1 for info in _ACTIVE_MIRRORS.values() if info.get("benchmark"))
+        return total, has_prod, benchmark_count
+
+
+def rate_limit_wait_seconds(error):
+    text = str(error or "").lower()
+    is_flood = any(term in text for term in (
+        "floodwait",
+        "flood_wait",
+        "flood wait",
+        "too many requests",
+        "rpcerror 420",
+        "wait of ",
+    ))
+    if is_flood:
+        matches = re.findall(r"(\d{1,5})\s*(?:seconds?|secs?|s)\b", text)
+        wait = int(matches[-1]) if matches else 60
+        return max(30, min(900, wait + 5)), 15 * 60
+    if any(term in text for term in ("timeout", "timed out", "connection reset", "temporarily unavailable")):
+        return 30, 5 * 60
+    return None, None
+
+
+def apply_mirror_backpressure(error):
+    global _MIRROR_BACKOFF_UNTIL, _MIRROR_DEGRADED_UNTIL
+    wait_seconds, degraded_seconds = rate_limit_wait_seconds(error)
+    if wait_seconds is None:
+        return False
+    now = time.time()
+    with _BACKOFF_LOCK:
+        _MIRROR_BACKOFF_UNTIL = max(_MIRROR_BACKOFF_UNTIL, now + wait_seconds)
+        _MIRROR_DEGRADED_UNTIL = max(_MIRROR_DEGRADED_UNTIL, now + degraded_seconds)
+    return True
+
+
+def mirror_backoff_remaining():
+    with _BACKOFF_LOCK:
+        return max(0, int(_MIRROR_BACKOFF_UNTIL - time.time()))
+
+
+def can_claim_mirror():
+    """
+    Return (can_claim: bool, slot_type: str | None)
+    Enforces:
+    1. Production mirror concurrency strictly = 1
+    2. Benchmark mirror concurrency max = 2
+    3. Backoff on rate limit
+    """
+    now = time.time()
+    with _BACKOFF_LOCK:
+        if now < _MIRROR_BACKOFF_UNTIL:
+            return False, None
+        degraded = now < _MIRROR_DEGRADED_UNTIL
+
+    total, has_prod, benchmark_count = active_mirror_stats()
+
+    # Rule 1: If any production job is running, concurrency is strictly 1.
+    if has_prod:
+        return False, None
+
+    # Rule 2: If degraded due to recent rate-limit/FloodWait, concurrency is capped at 1.
+    if degraded and total >= 1:
+        return False, None
+
+    # Rule 3: Total active mirrors cannot exceed 2 under any circumstances.
+    if total >= 2 or benchmark_count >= 2:
+        return False, None
+
+    # Rule 4: If 1 benchmark mirror is currently active, only a second BENCHMARK job is allowed.
+    if benchmark_count == 1:
+        return True, "benchmark_only"
+
+    # Rule 5: If 0 mirrors active, any job (production or benchmark) is allowed.
+    return True, "any"
+
+
+def record_last_success():
+    with _CONFIG_WRITE_LOCK:
+        try:
+            cfg = load_config()
+            cfg["last_success_at"] = int(time.time())
+            save_config(cfg)
+        except Exception:
+            pass
+
+
+def mirror_worker(config, job, stop_event, status_callback=None):
+    job_id = str(job.get("id") or "")
+    try:
+        run_job(config, job, stop_event, status_callback)
+        record_last_success()
+    except Exception as exc:
+        limited = apply_mirror_backpressure(exc)
+        if status_callback:
+            if limited:
+                status_callback(f"Telegram đang giới hạn tạm thời · Reader tự giảm tốc ({str(exc)[:80]})")
+            else:
+                status_callback(f"Mirror tạm lỗi: {str(exc)[:160]}")
+    finally:
+        with _ACTIVE_MIRRORS_LOCK:
+            _ACTIVE_MIRRORS.pop(job_id, None)
+            _ACTIVE_SUBPROCESSES.pop(job_id, None)
+
+
+def start_mirror_job(config, job, stop_event, status_callback=None):
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        raise RuntimeError("reader_job_missing_identity")
+    channel = str(job.get("channel_ref") or "").strip()
+    source_id = str(job.get("source_id") or "")
+    profile = choose_v5_profile(config, channel, source_id)
+    profile_id = str(profile["id"]) if profile else ""
+    is_benchmark = bool(job.get("benchmark"))
+
+    thread = threading.Thread(
+        target=mirror_worker,
+        args=(config, job, stop_event, status_callback),
+        daemon=True,
+        name=f"v5-mirror-{job_id[:8]}"
+    )
+    with _ACTIVE_MIRRORS_LOCK:
+        if job_id in _ACTIVE_MIRRORS:
+            raise RuntimeError("v5_mirror_job_already_active")
+        _ACTIVE_MIRRORS[job_id] = {
+            "thread": thread,
+            "benchmark": is_benchmark,
+            "profile_id": profile_id,
+            "started_at": time.time()
+        }
+    thread.start()
+    return thread
+
+
+def terminate_all_subprocesses():
+    with _ACTIVE_MIRRORS_LOCK:
+        procs = list(_ACTIVE_SUBPROCESSES.values())
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    for p in procs:
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def sync_remote_profiles(config):
+    try:
+        heartbeat = api(
+            config,
+            "heartbeat-agent",
+            {"platform": f"Windows {platform.release()}", "app_version": APP_VERSION},
+        )
+        remote_profiles = {item.get("id"): item for item in heartbeat.get("profiles", [])}
+        changed = False
+        retained_profiles = []
+        for local_profile in config.get("profiles", []):
+            remote = remote_profiles.get(local_profile.get("id"))
+            if not remote:
+                changed = True
+                continue
+            retained_profiles.append(local_profile)
+            if local_profile.get("status") != remote.get("status"):
+                local_profile["status"] = remote.get("status")
+                changed = True
+        if changed:
+            config["profiles"] = retained_profiles
+            with _CONFIG_WRITE_LOCK:
+                save_config(config)
+    except Exception:
+        pass
+    return config
 
 
 def agent_loop(stop_event, status_callback=None):
@@ -382,37 +599,61 @@ def agent_loop(stop_event, status_callback=None):
             if not config.get("agent_token"):
                 stop_event.wait(5)
                 continue
-            heartbeat = api(config, "heartbeat-agent", {"platform": f"Windows {platform.release()}", "app_version": APP_VERSION})
-            remote_profiles = {item.get("id"): item for item in heartbeat.get("profiles", [])}
-            changed = False
-            retained_profiles = []
-            for local_profile in config.get("profiles", []):
-                remote = remote_profiles.get(local_profile.get("id"))
-                if not remote:
-                    changed = True
-                    continue
-                retained_profiles.append(local_profile)
-                if local_profile.get("status") != remote.get("status"):
-                    local_profile["status"] = remote.get("status")
-                    changed = True
-            if changed:
-                config["profiles"] = retained_profiles
-                save_config(config)
-            job = claim_next_job(config)
-            if job:
-                run_job(config, job, stop_event, status_callback)
-                config = load_config()
-                config["last_success_at"] = int(time.time())
-                save_config(config)
-            else:
+
+            config = sync_remote_profiles(config)
+            total_active, has_prod, benchmark_count = active_mirror_stats()
+
+            backoff = mirror_backoff_remaining()
+            if backoff > 0 and total_active == 0:
                 if status_callback:
-                    suffix = " · R2 V5 sẵn sàng" if has_v5_r2_config(config) else ""
-                    status_callback("Đã kết nối · đang chờ công việc" + suffix)
-                stop_event.wait(15)
+                    status_callback(f"Telegram đang nghỉ an toàn · còn khoảng {backoff}s")
+                stop_event.wait(min(10, max(1, backoff)))
+                continue
+
+            # Generic import/reconcile remains exclusive and always has priority
+            # when no mirrors are active. It never overlaps mirror workers.
+            if total_active == 0:
+                generic_job = claim_generic_job(config)
+                if generic_job:
+                    run_job(config, generic_job, stop_event, status_callback)
+                    record_last_success()
+                    continue
+
+            # Evaluate mirror concurrency slots
+            can_claim, slot_type = can_claim_mirror()
+            if can_claim:
+                job = claim_v5_job(config)
+                if job:
+                    is_benchmark = bool(job.get("benchmark"))
+                    if slot_type == "benchmark_only" and not is_benchmark:
+                        # Defensive: production job claimed while a benchmark job is running.
+                        # Release it and do not run concurrently.
+                        pass
+                    else:
+                        start_mirror_job(config, job, stop_event, status_callback)
+                        total_active, has_prod, benchmark_count = active_mirror_stats()
+                        if status_callback:
+                            mode_desc = "benchmark" if is_benchmark else "production"
+                            status_callback(f"Đang mirror V5 ({mode_desc}) · {total_active} active job(s)")
+                        stop_event.wait(1)
+                        continue
+
+            if total_active > 0:
+                if status_callback:
+                    status_callback(f"Đang mirror V5 · {total_active} active job(s)")
+                stop_event.wait(1)
+                continue
+
+            if status_callback:
+                suffix = " · R2 V5 sẵn sàng" if has_v5_r2_config(config) else ""
+                status_callback("Đã kết nối · đang chờ công việc" + suffix)
+            stop_event.wait(15)
         except Exception as exc:
             if status_callback:
-                status_callback(f"Tạm thời chưa kết nối: {exc}")
+                status_callback(f"Tạm thời chưa kết nối: {str(exc)[:200]}")
             stop_event.wait(15)
+
+    terminate_all_subprocesses()
 
 
 def start_background(status_callback=None):

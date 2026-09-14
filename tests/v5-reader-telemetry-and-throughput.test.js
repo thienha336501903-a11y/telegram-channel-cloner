@@ -25,14 +25,16 @@ function resolvePython() {
   }
 }
 
-test('1. Concurrency strictly remains 1 across claim and execution', () => {
+test('1. Production concurrency strictly remains 1 and benchmark concurrency capped at 2', () => {
   assert.match(jobs, /claim_v5_telegram_mirror_job/);
-  // Claim RPC claims at most one job
   assert.match(jobs, /const claimed = one\(await db\('rpc\/claim_v5_telegram_mirror_job'/);
-  // Agent loop processes jobs sequentially
-  assert.match(agent, /job = claim_next_job\(config\)\s*\n\s*if job:\s*\n\s*run_job\(config, job, stop_event, status_callback\)/);
-  assert.doesNotMatch(agent, /max_workers\s*=\s*[2-9]/);
-  assert.doesNotMatch(jobs, /p_concurrency/);
+  // Production concurrency strictly 1
+  assert.match(jobs, /runningJobs\.length === 1/);
+  assert.match(jobs, /!isRunningBenchmark/);
+  assert.match(agent, /if has_prod:\s*\n\s*return False, None/);
+  // Benchmark concurrency capped at 2
+  assert.match(agent, /if total >= 2 or benchmark_count >= 2:\s*\n\s*return False, None/);
+  assert.match(jobs, /runningJobs\.length >= 2/);
 });
 
 test('2. Duplicate Telegram message fetch is removed and message object is reused', () => {

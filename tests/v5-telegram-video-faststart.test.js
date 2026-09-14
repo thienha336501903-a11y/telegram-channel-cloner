@@ -66,9 +66,9 @@ test('5. Non-video assets (photos, thumbnails, documents) bypass faststart remux
   assert.match(worker, /if is_video:/);
 });
 
-test('6. Reader version bumped to 1.3.x across agent and installer', () => {
-  assert.match(agent, /APP_VERSION = "1\.3\.[34]"/);
-  assert.match(installer, /#define MyAppVersion "1\.3\.[34]"/);
+test('6. Reader version bumped across agent and installer', () => {
+  assert.match(agent, /APP_VERSION = "1\.[34]\.[0-9]+"/);
+  assert.match(installer, /#define MyAppVersion "1\.[34]\.[0-9]+"/);
 });
 
 test('7. Installer packages bundled ffmpeg.exe and ffprobe.exe to {app}\\bin', () => {
