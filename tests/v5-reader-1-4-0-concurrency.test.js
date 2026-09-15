@@ -12,13 +12,17 @@ const jobs = read('lib/v5-mirror-jobs.js');
 const storage = read('reader-manager/reader_manager_storage.py');
 const installer = read('reader-manager/installer.iss');
 
-test('1. Production concurrency strictly max = 1 across client and backend', () => {
-  // Client enforcement: if has_prod, can_claim_mirror returns False
+test('1. Normal production concurrency remains max = 1; only exact server-authorized Phase 4 pair may overlap', () => {
+  // Client enforcement for ordinary production: if has_prod, can_claim_mirror returns False.
   assert.match(agent, /if has_prod:\s*\n\s*return False, None/);
-  // Backend enforcement: if 1 job is running and not benchmark, cannot claim
-  assert.match(jobs, /if \(runningJobs && runningJobs\.length === 1\) \{[\s\S]*const isRunningBenchmark = Boolean\(benchmarkPayload\(runningJobs\[0\]\)\);[\s\S]*if \(!isRunningBenchmark\) \{[\s\S]*return null;/);
-  // Backend enforcement: newly claimed job cannot be production if already running 1 job
-  assert.match(jobs, /if \(!isClaimedBenchmark\) \{[\s\S]*status: 'queued'[\s\S]*return null;/);
+  // Backend ordinary-production guard: a non-benchmark running job is allowed a second slot only
+  // when it passes the exact server-side production canary authorization.
+  assert.match(jobs, /runningCanary = await isProductionCanaryJob\(runningJobs\[0\]\)/);
+  assert.match(jobs, /if \(!runningCanary\) \{[\s\S]*return null;/);
+  // A claimed second job must also be the exact canary; otherwise it is safely requeued.
+  assert.match(jobs, /const isClaimedCanary = runningCanary && await isProductionCanaryJob\(claimed\)/);
+  assert.match(jobs, /if \(!isClaimedCanary\) \{[\s\S]*requeueClaimedMirrorJob\(claimed, owner\);[\s\S]*return null;/);
+  assert.match(jobs, /async function requeueClaimedMirrorJob\(claimed, owner\) \{[\s\S]*status: 'queued'/);
 });
 
 test('2. Benchmark concurrency max = 2', () => {
@@ -31,22 +35,24 @@ test('2. Benchmark concurrency max = 2', () => {
 test('3. Benchmark worker #2 can claim and run while benchmark worker #1 is active', () => {
   // When benchmark_count == 1, client allows benchmark_only slot
   assert.match(agent, /if benchmark_count == 1:\s*\n\s*return True, "benchmark_only"/);
-  // Backend allows second job if first job is benchmark
+  // Backend recognizes the running benchmark class
   assert.match(jobs, /const isRunningBenchmark = Boolean\(benchmarkPayload\(runningJobs\[0\]\)\);/);
 });
 
-test('4. Worker #3 cannot run when 2 benchmark workers are already active', () => {
+test('4. Worker #3 cannot run when 2 workers are already active', () => {
   // Client blocks when benchmark_count >= 2 or total >= 2
   assert.match(agent, /if total >= 2 or benchmark_count >= 2:\s*\n\s*return False, None/);
-  // Backend blocks when runningJobs.length >= 2
+  // Backend blocks when runningJobs.length >= 2, including Phase 4 canary
   assert.match(jobs, /if \(runningJobs && runningJobs\.length >= 2\) \{\s*\n\s*return null;\s*\n\s*\}/);
 });
 
-test('5. Production job cannot exploit benchmark path', () => {
+test('5. Production cannot self-authorize benchmark or Phase 4 canary paths', () => {
   assert.match(jobs, /function benchmarkObjectKeyFor\(job\) \{/);
   assert.match(jobs, /!key\.startsWith\(BENCHMARK_PREFIX\)/);
   assert.match(jobs, /throw new Error\('v5_mirror_benchmark_object_key_denied'\);/);
-  assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\)/);
+  assert.match(jobs, /function isProductionCanaryAsset\(asset\) \{/);
+  assert.match(jobs, /PHASE4_CANARY_MESSAGE_ROWS\.has\(clean\(asset\?\.telegram_message_row_id\)\)/);
+  assert.doesNotMatch(jobs, /payload\.production_canary\s*===\s*true/);
 });
 
 test('6. Benchmark prefix guard strictly enforced', () => {
@@ -55,7 +61,8 @@ test('6. Benchmark prefix guard strictly enforced', () => {
 });
 
 test('7. Heartbeat telemetry still persists into v5_jobs.result.telemetry for benchmark jobs', () => {
-  assert.match(jobs, /if \(job && benchmarkPayload\(job\)\) \{/);
+  assert.match(jobs, /const persistTelemetry = job && \(benchmarkPayload\(job\) \|\| await isProductionCanaryJob\(job\)\);/);
+  assert.match(jobs, /if \(persistTelemetry\) \{/);
   assert.match(jobs, /telemetry: \{[\s\S]*progress_stage: stage/);
   assert.match(jobs, /bytes_per_second: bps/);
   assert.match(jobs, /mb_per_second: mbPerSec/);
@@ -105,8 +112,10 @@ test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
   assert.match(jobs, /const runningJobs = await selectMany\(/);
 });
 
-test('14. Benchmark workers can share active local profile via allow_busy=is_benchmark', () => {
+test('14. Benchmark/canary workers can share active local profile only through server-returned benchmark scheduling bit', () => {
   assert.match(agent, /def ready_profiles\(config, allow_busy=False\):/);
   assert.match(agent, /def choose_v5_profile\(config, channel, source_id, allow_busy=False\):/);
   assert.match(agent, /profile = choose_v5_profile\(config, channel, source_id, allow_busy=is_benchmark\)/);
+  assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
+  assert.match(jobs, /production_canary: productionCanary/);
 });
