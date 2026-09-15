@@ -10,7 +10,8 @@ import {
   reportReaderSourceAccess,
   updateReaderProfile
 } from '../../lib/reader-manager.js';
-import { claimV5MirrorJob, finishV5MirrorJob, heartbeatV5MirrorJob } from '../../lib/v5-mirror-jobs.js';
+import { claimV5MirrorJob, heartbeatV5MirrorJob } from '../../lib/v5-mirror-jobs.js';
+import { finishPhase4CanaryMirrorJob } from '../../lib/v5-phase4-canary-finish.js';
 import { patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
@@ -118,7 +119,7 @@ export default async function handler(req, res) {
   if (action === 'v5-mirror-finish') {
     if (!agentId) return json(res, 400, { ok: false, error: 'agent_id_required' });
     try {
-      const job = await finishV5MirrorJob({
+      const job = await finishPhase4CanaryMirrorJob({
         jobId: body.job_id,
         agentId,
         ok: body.ok === true,
