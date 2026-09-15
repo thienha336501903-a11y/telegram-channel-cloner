@@ -47,10 +47,12 @@ test('successful canary finish restores heartbeat telemetry after canonical RPC 
   assert.match(finish, /Prefer: 'return=representation'/);
 });
 
-test('Reader finish endpoint routes through the Phase 4 wrapper while claim and heartbeat stay unchanged', () => {
+test('Reader finish endpoint keeps the Phase 4 wrapper while recovery serializes only the canary claim and heartbeat stays unchanged', () => {
   assert.match(complete, /import \{ claimV5MirrorJob, heartbeatV5MirrorJob \} from '\.\.\/\.\.\/lib\/v5-mirror-jobs\.js'/);
   assert.match(complete, /import \{ finishPhase4CanaryMirrorJob \} from '\.\.\/\.\.\/lib\/v5-phase4-canary-finish\.js'/);
   assert.match(complete, /const job = await finishPhase4CanaryMirrorJob\(\{/);
-  assert.match(complete, /const job = await claimV5MirrorJob\(agentId\)/);
+  assert.match(complete, /const job = phase4RecoverySerialJob\(await claimV5MirrorJob\(agentId\)\);/);
+  assert.match(complete, /if \(!job \|\| job\.production_canary !== true\) return job;/);
+  assert.match(complete, /benchmark: false/);
   assert.match(complete, /const job = await heartbeatV5MirrorJob\(\{/);
 });
