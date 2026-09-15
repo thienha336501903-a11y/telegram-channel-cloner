@@ -21,6 +21,18 @@ function safeProgress(value) {
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
+function phase4RecoverySerialJob(job) {
+  if (!job || job.production_canary !== true) return job;
+  return {
+    ...job,
+    // Recovery after the Phase 4A source-access anomaly: keep canonical
+    // production-canary finish semantics, but make Reader 1.4.0 schedule the
+    // remaining canary job as ordinary serial production (effective max = 1).
+    benchmark: false,
+    phase4_recovery_serial: true
+  };
+}
+
 export default async function handler(req, res) {
   if (!method(req, res, ['POST'])) return;
   const action = String(req.query?.action || '').trim();
@@ -94,7 +106,7 @@ export default async function handler(req, res) {
     if (!capabilities.includes('v5_r2_mirror_v1')) return json(res, 400, { ok: false, error: 'v5_mirror_capability_required' });
     if (!agentId) return json(res, 400, { ok: false, error: 'agent_id_required' });
     try {
-      const job = await claimV5MirrorJob(agentId);
+      const job = phase4RecoverySerialJob(await claimV5MirrorJob(agentId));
       return json(res, 200, { ok: true, job });
     } catch (error) {
       return json(res, 500, { ok: false, error: String(error?.message || 'v5_mirror_claim_failed') });
