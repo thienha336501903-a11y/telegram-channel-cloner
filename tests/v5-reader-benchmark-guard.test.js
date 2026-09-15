@@ -21,10 +21,11 @@ test('R2 benchmark jobs are opt-in and restricted to the approved isolated prefi
   assert.match(jobs, /v5_mirror_benchmark_object_key_denied/);
 });
 
-test('benchmark object key is returned to Reader while production object key remains unchanged', () => {
+test('benchmark object key is isolated while exact Phase 4 canary retains canonical production key', () => {
   assert.match(jobs, /const benchmarkObjectKey = benchmarkObjectKeyFor\(claimed\)/);
   assert.match(jobs, /const objectKey = benchmarkObjectKey \|\| objectKeyFor\(claimed/);
-  assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\)/);
+  assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
+  assert.match(jobs, /production_canary: productionCanary/);
   assert.match(jobs, /media\/v5\/\$\{job\.course_id\}\/\$\{asset\.id\}/);
 });
 
@@ -51,26 +52,30 @@ test('benchmark video permits only bounded faststart size drift while production
   assert.match(benchmarkFinish, /source_expected_bytes: sourceExpectedBytes/);
 });
 
-test('benchmark heartbeat telemetry is forwarded from API and persisted into result.telemetry', () => {
+test('benchmark heartbeat telemetry is forwarded from API and remains persisted into result.telemetry', () => {
   const complete = fs.readFileSync(new URL('../api/reader/complete.js', import.meta.url), 'utf8');
   assert.match(complete, /progressStage:\s*typeof body\.progress_stage === 'string'\s*\?\s*body\.progress_stage\s*:\s*null/);
   assert.match(complete, /bytesPerSecond:\s*safeProgress\(body\.bytes_per_second\)/);
   assert.match(complete, /etaSeconds:\s*safeProgress\(body\.eta_seconds\)/);
   assert.match(complete, /telemetry:\s*body\.telemetry/);
 
-  assert.match(jobs, /if \(job && benchmarkPayload\(job\)\) \{/);
+  assert.match(jobs, /const persistTelemetry = job && \(benchmarkPayload\(job\) \|\| await isProductionCanaryJob\(job\)\);/);
+  assert.match(jobs, /if \(persistTelemetry\) \{/);
   assert.match(jobs, /prevResult\.telemetry/);
   assert.match(jobs, /samples\.push\(\{/);
   assert.match(jobs, /stages\[stage\]/);
   assert.match(jobs, /mb_per_second:\s*mbPerSec/);
 });
 
-test('production heartbeat behavior remains strictly unchanged (no telemetry written to result for production)', () => {
+test('normal production heartbeat remains unchanged; telemetry exception is only exact server-authorized Phase 4 canary', () => {
   assert.match(jobs, /export async function heartbeatV5MirrorJob/);
-  // Telemetry in result is only written if benchmarkPayload is true
   assert.match(jobs, /if \(stage \|\| bps !== null \|\| eta !== null\) \{\s*const job = await selectOne\(/);
-  assert.match(jobs, /if \(job && benchmarkPayload\(job\)\) \{\s*const nowIso = values\.updated_at;/);
-  // Default values only patch locked_at, updated_at, progress_current, progress_total
+  assert.match(jobs, /const persistTelemetry = job && \(benchmarkPayload\(job\) \|\| await isProductionCanaryJob\(job\)\);/);
+  assert.match(jobs, /async function isProductionCanaryJob\(job\)/);
+  assert.match(jobs, /clean\(job\?\.course_id\) !== PHASE4_CANARY_COURSE_ID/);
+  assert.match(jobs, /PHASE4_CANARY_MESSAGE_ROWS\.has\(clean\(asset\?\.telegram_message_row_id\)\)/);
+  assert.doesNotMatch(jobs, /payload\.production_canary\s*===\s*true/);
+  // Default values patch only lock/update/progress. result is added only inside persistTelemetry.
   assert.match(jobs, /const values = \{\s*locked_at: new Date\(\)\.toISOString\(\),\s*updated_at: new Date\(\)\.toISOString\(\)\s*\};/);
 });
 
@@ -80,7 +85,7 @@ test('benchmark finish merges and preserves existing heartbeat telemetry in resu
   assert.match(benchmarkFinish, /\.\.\.\(finalTelemetry \? \{ telemetry: finalTelemetry \} : \{\}\)/);
 });
 
-test('production concurrency strictly remains 1 and benchmark concurrency capped at 2', () => {
+test('Reader client ordinary production remains concurrency 1 and all local mirror concurrency is capped at 2', () => {
   const agentScript = fs.readFileSync(new URL('../reader-manager/reader_manager_agent.py', import.meta.url), 'utf8');
   assert.doesNotMatch(agentScript, /ThreadPoolExecutor|ProcessPoolExecutor|asyncio\.gather/);
   assert.match(agentScript, /def run_job\(config, job,/);
