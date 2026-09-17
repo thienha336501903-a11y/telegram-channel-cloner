@@ -93,6 +93,7 @@ test('7. Checksum SHA256 calculation verifies exact file hash', () => {
 test('8. validateReportedMirror enforces exact size match for original-v1', () => {
   const asset = { id: 'asset-1', bytes: 5000, mime_type: 'video/mp4' };
   const expectedKey = 'media/v5/course-1/asset-1/video.mp4';
+  const validSha = 'a'.repeat(64);
 
   const valid = validateReportedMirror({
     job: { id: 'job-1' },
@@ -101,13 +102,13 @@ test('8. validateReportedMirror enforces exact size match for original-v1', () =
     finalBytes: 5000,
     sourceBytes: 5000,
     transformVersion: 'original-v1',
-    checksumSha256: 'abc123sha',
+    checksumSha256: validSha,
     expectedObjectKey: expectedKey
   });
   assert.equal(valid.finalBytes, 5000);
   assert.equal(valid.sourceBytes, 5000);
   assert.equal(valid.transformVersion, 'original-v1');
-  assert.equal(valid.checksumSha256, 'abc123sha');
+  assert.equal(valid.checksumSha256, validSha);
 
   assert.throws(() => {
     validateReportedMirror({
@@ -125,6 +126,7 @@ test('8. validateReportedMirror enforces exact size match for original-v1', () =
 test('9. validateReportedMirror permits bounded faststart drift for ffmpeg-faststart-v1 and rejects excessive drift', () => {
   const asset = { id: 'asset-video', bytes: 79579331, mime_type: 'video/mp4' };
   const expectedKey = 'media/v5/course-mochi/asset-video/lesson.mp4';
+  const validSha = 'd'.repeat(64);
 
   const valid = validateReportedMirror({
     job: { id: 'job-mochi' },
@@ -133,13 +135,13 @@ test('9. validateReportedMirror permits bounded faststart drift for ffmpeg-fasts
     finalBytes: 79579382,
     sourceBytes: 79579331,
     transformVersion: 'ffmpeg-faststart-v1',
-    checksumSha256: 'deadbeef79579382',
+    checksumSha256: validSha,
     expectedObjectKey: expectedKey
   });
   assert.equal(valid.finalBytes, 79579382);
   assert.equal(valid.sourceBytes, 79579331);
   assert.equal(valid.transformVersion, 'ffmpeg-faststart-v1');
-  assert.equal(valid.checksumSha256, 'deadbeef79579382');
+  assert.equal(valid.checksumSha256, validSha);
 
   assert.throws(() => {
     validateReportedMirror({
@@ -149,9 +151,46 @@ test('9. validateReportedMirror permits bounded faststart drift for ffmpeg-fasts
       finalBytes: 82000000,
       sourceBytes: 79579331,
       transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: validSha,
       expectedObjectKey: expectedKey
     });
   }, /v5_mirror_faststart_drift_excessive:82000000\/79579331/);
+});
+
+test('9b. validateReportedMirror requires checksum for ffmpeg-faststart-v1', () => {
+  const asset = { id: 'asset-video', bytes: 79579331, mime_type: 'video/mp4' };
+  const expectedKey = 'media/v5/course-mochi/asset-video/lesson.mp4';
+
+  assert.throws(() => {
+    validateReportedMirror({
+      job: { id: 'job-mochi' },
+      asset,
+      objectKey: expectedKey,
+      finalBytes: 79579382,
+      sourceBytes: 79579331,
+      transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: null,
+      expectedObjectKey: expectedKey
+    });
+  }, /v5_mirror_checksum_required/);
+});
+
+test('9c. validateReportedMirror rejects malformed checksum for ffmpeg-faststart-v1', () => {
+  const asset = { id: 'asset-video', bytes: 79579331, mime_type: 'video/mp4' };
+  const expectedKey = 'media/v5/course-mochi/asset-video/lesson.mp4';
+
+  assert.throws(() => {
+    validateReportedMirror({
+      job: { id: 'job-mochi' },
+      asset,
+      objectKey: expectedKey,
+      finalBytes: 79579382,
+      sourceBytes: 79579331,
+      transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: 'deadbeef123',
+      expectedObjectKey: expectedKey
+    });
+  }, /v5_mirror_checksum_invalid/);
 });
 
 test('10. Artifact provenance contract updates media asset bytes and records result provenance', () => {
