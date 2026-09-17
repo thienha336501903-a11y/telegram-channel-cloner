@@ -36,30 +36,37 @@ function resolvePython() {
 
 const pythonBin = resolvePython();
 
-test('1. Migration SQL defines finish_v5_telegram_mirror_job with p_attempt and search_path security', () => {
+test('1. Migration SQL defines finish_v5_telegram_mirror_job with required p_attempt and search_path security', () => {
   assert.match(migrationCode, /create or replace function public\.finish_v5_telegram_mirror_job/);
-  assert.match(migrationCode, /p_attempt integer default null/);
+  assert.match(migrationCode, /p_attempt integer\s*\)/);
+  assert.doesNotMatch(migrationCode, /p_attempt integer default/);
   assert.match(migrationCode, /set search_path = pg_catalog, public/);
+  assert.match(migrationCode, /v5_mirror_attempt_required/);
   assert.match(migrationCode, /v5_mirror_lease_fenced:expected_attempt_%_got_%/);
   assert.match(migrationCode, /revoke all on function public\.finish_v5_telegram_mirror_job/);
   assert.match(migrationCode, /grant execute on function public\.finish_v5_telegram_mirror_job/);
 });
 
-test('2. finishOwnedJob in lib/v5-mirror-jobs.js enforces attempt fencing generation', () => {
+test('2. finishOwnedJob in lib/v5-mirror-jobs.js enforces required attempt fencing generation without fallback', () => {
   assert.match(jobsCode, /attempt = null/);
-  assert.match(jobsCode, /if \(attempt !== null && attempt !== undefined && job\.attempts !== null && job\.attempts !== undefined\)/);
-  assert.match(jobsCode, /v5_mirror_lease_fenced:expected_attempt_\$\{job\.attempts\}_got_\$\{attempt\}/);
-  assert.match(jobsCode, /rpcBody\.p_attempt = Number\(attempt\)/);
+  assert.match(jobsCode, /parsedAttempt === null/);
+  assert.match(jobsCode, /v5_mirror_attempt_required/);
+  assert.match(jobsCode, /v5_mirror_lease_fenced:expected_attempt_\$\{job\.attempts\}_got_\$\{parsedAttempt\}/);
+  assert.match(jobsCode, /p_attempt: Number\(parsedAttempt\)/);
+  assert.doesNotMatch(jobsCode, /delete rpcBody\.p_attempt/);
 });
 
-test('3. finishPhase4CanaryMirrorJob accepts and forwards attempt with fencing check', () => {
+test('3. finishPhase4CanaryMirrorJob accepts and forwards attempt with strict fencing check without fallback', () => {
   assert.match(canaryFinishCode, /attempt = null/);
-  assert.match(canaryFinishCode, /v5_mirror_lease_fenced:expected_attempt_\$\{job\.attempts\}_got_\$\{attempt\}/);
-  assert.match(canaryFinishCode, /rpcBody\.p_attempt = Number\(attempt\)/);
+  assert.match(canaryFinishCode, /v5_mirror_attempt_required/);
+  assert.match(canaryFinishCode, /v5_mirror_lease_fenced:expected_attempt_\$\{job\.attempts\}_got_\$\{parsedAttempt\}/);
+  assert.match(canaryFinishCode, /p_attempt: Number\(parsedAttempt\)/);
+  assert.doesNotMatch(canaryFinishCode, /delete rpcBody\.p_attempt/);
 });
 
-test('4. api/reader/complete.js accepts attempt and maps lease_fenced to 409', () => {
-  assert.match(apiCode, /attempt: safeProgress\(body\.attempt\)/);
+test('4. api/reader/complete.js requires attempt and maps lease_fenced to 409', () => {
+  assert.match(apiCode, /const attempt = safeProgress\(body\.attempt\)/);
+  assert.match(apiCode, /v5_mirror_attempt_required/);
   assert.match(apiCode, /errMsg\.includes\('lease_fenced'\)/);
   assert.match(apiCode, /v5_mirror_lease_fenced/);
 });
@@ -69,9 +76,10 @@ test('5. reader_manager_agent.py includes attempt in mirror finish completion pa
   assert.match(agentCode, /"attempt": int\(attempt_val or 0\)/);
 });
 
-test('6. Finish outbox mechanism saves unconfirmed completions and unlinks on success', () => {
+test('6. Finish outbox mechanism saves unconfirmed completions with attempt and unlinks on success', () => {
   assert.match(agentCode, /def finish_outbox_dir\(\):/);
   assert.match(agentCode, /def save_pending_finish\(job_id, completion_payload\):/);
+  assert.match(agentCode, /"attempt": attempt/);
   assert.match(agentCode, /def remove_pending_finish\(job_id\):/);
   assert.match(agentCode, /def list_pending_finishes\(\):/);
   assert.match(agentCode, /def flush_pending_finishes\(config\):/);
@@ -102,12 +110,13 @@ outbox = finish_outbox_dir()
 test_job_id = "test-outbox-job-12345"
 
 # 1. Save pending finish
-save_pending_finish(test_job_id, {"job_id": test_job_id, "bytes": 5000})
+save_pending_finish(test_job_id, {"job_id": test_job_id, "attempt": 2, "bytes": 5000})
 
 # 2. Verify in list
 items = list_pending_finishes()
 found = [data for _, data in items if data.get("job_id") == test_job_id]
 assert len(found) == 1, f"Expected 1 found, got {len(found)}"
+assert found[0]["attempt"] == 2
 assert found[0]["completion"]["bytes"] == 5000
 
 # 3. Remove pending finish
@@ -130,5 +139,5 @@ test('10. Database migration SQL is mirrored identically between LMS and cloner 
     return;
   }
   const lmsSql = fs.readFileSync(lmsMigrationPath, 'utf8');
-  assert.equal(lmsSql.trim(), migrationCode.trim());
+  assert.equal(lmsSql.replace(/\r\n/g, '\n').trim(), migrationCode.replace(/\r\n/g, '\n').trim());
 });

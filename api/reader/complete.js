@@ -130,6 +130,10 @@ export default async function handler(req, res) {
 
   if (action === 'v5-mirror-finish') {
     if (!agentId) return json(res, 400, { ok: false, error: 'agent_id_required' });
+    const attempt = safeProgress(body.attempt);
+    if (attempt === null || attempt === undefined || attempt < 1) {
+      return json(res, 400, { ok: false, error: 'v5_mirror_attempt_required' });
+    }
     try {
       const job = await finishPhase4CanaryMirrorJob({
         jobId: body.job_id,
@@ -141,7 +145,7 @@ export default async function handler(req, res) {
         sourceBytes: safeProgress(body.source_bytes),
         transformVersion: body.transform_version,
         checksumSha256: body.checksum_sha256,
-        attempt: safeProgress(body.attempt),
+        attempt,
         etag: body.etag,
         error: body.error,
         telemetry: body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry) ? body.telemetry : null

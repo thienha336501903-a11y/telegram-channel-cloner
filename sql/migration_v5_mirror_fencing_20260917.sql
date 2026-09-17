@@ -2,19 +2,20 @@
 -- Date: 2026-09-17
 -- System: System B (LMS & Reader)
 
--- 1. Drop old 7-argument signature to prevent function overloading ambiguity in PostgREST RPC
+-- 1. Drop old signatures to prevent function overloading ambiguity in PostgREST RPC
 drop function if exists public.finish_v5_telegram_mirror_job(uuid, text, boolean, text, bigint, text, text);
+drop function if exists public.finish_v5_telegram_mirror_job(uuid, text, boolean, text, bigint, text, text, integer);
 
--- 2. Create unified 8-argument signature with default p_attempt = null
+-- 2. Create strict 8-argument signature requiring p_attempt
 create or replace function public.finish_v5_telegram_mirror_job(
   p_job_id uuid,
   p_agent_id text,
   p_ok boolean,
-  p_object_key text default null,
-  p_bytes bigint default null,
-  p_etag text default null,
-  p_error text default null,
-  p_attempt integer default null
+  p_object_key text,
+  p_bytes bigint,
+  p_etag text,
+  p_error text,
+  p_attempt integer
 )
 returns public.v5_jobs
 language plpgsql
@@ -25,6 +26,10 @@ declare
   j public.v5_jobs;
   now_ts timestamptz := now();
 begin
+  if p_attempt is null then
+    raise exception 'v5_mirror_attempt_required';
+  end if;
+
   select * into j
     from public.v5_jobs
    where id = p_job_id
@@ -38,7 +43,7 @@ begin
   end if;
 
   -- Lease fencing: verify that the caller's attempt matches the active lease generation
-  if p_attempt is not null and j.attempts is distinct from p_attempt then
+  if j.attempts is distinct from p_attempt then
     raise exception 'v5_mirror_lease_fenced:expected_attempt_%_got_%', j.attempts, p_attempt;
   end if;
 

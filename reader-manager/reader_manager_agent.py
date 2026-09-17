@@ -202,8 +202,10 @@ def save_pending_finish(job_id, completion_payload):
         outbox = finish_outbox_dir()
         clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
         item_path = outbox / f"finish_{clean_id}.json"
+        attempt = completion_payload.get("attempt") if isinstance(completion_payload, dict) else None
         item_path.write_text(json.dumps({
             "job_id": job_id,
+            "attempt": attempt,
             "completion": completion_payload,
             "saved_at": time.time(),
             "attempts": 0
@@ -252,6 +254,12 @@ def flush_pending_finishes(config):
         if not job_id or not completion:
             path_obj.unlink(missing_ok=True)
             continue
+        attempt = completion.get("attempt") or item.get("attempt")
+        if not attempt:
+            print(f"Dropping outbox item without attempt for job {job_id}", flush=True)
+            path_obj.unlink(missing_ok=True)
+            continue
+        completion["attempt"] = int(attempt)
         try:
             print(f"Retrying pending finish from outbox for job {job_id}...", flush=True)
             api(config, "v5-mirror-finish", completion, timeout=20)
