@@ -2,13 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { sanitizeTelemetry } from '../lib/v5-mirror-jobs.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
+
+function resolvePython() {
+  if (process.env.PYTHON) return process.env.PYTHON;
+  try {
+    const cmd = process.platform === 'win32' ? 'where.exe python' : 'which python || which python3';
+    return execSync(cmd, { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+  } catch {
+    return 'python';
+  }
+}
+const pythonBin = resolvePython();
 
 test('P0 regression: old exact-source-size assumption in validateReportedMirror rejects faststart drift', () => {
   const jobsCode = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'v5-mirror-jobs.js'), 'utf8');
@@ -115,7 +126,7 @@ assert classify_telegram_error(Exception("Random unknown error")) == "reader_sou
 print("ALL_TAXONOMY_OK")
 `;
 
-  const res = spawnSync('python', ['-c', pythonCode], {
+  const res = spawnSync(pythonBin, ['-c', pythonCode], {
     cwd: REPO_ROOT,
     encoding: 'utf8'
   });
@@ -152,7 +163,7 @@ log_path.unlink(missing_ok=True)
 print("FINISH_LOG_OK")
 `;
 
-  const res = spawnSync('python', ['-c', pythonCode], {
+  const res = spawnSync(pythonBin, ['-c', pythonCode], {
     cwd: REPO_ROOT,
     encoding: 'utf8'
   });
