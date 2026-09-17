@@ -2,6 +2,10 @@
 -- Date: 2026-09-17
 -- System: System B (LMS & Reader)
 
+-- 1. Drop old 7-argument signature to prevent function overloading ambiguity in PostgREST RPC
+drop function if exists public.finish_v5_telegram_mirror_job(uuid, text, boolean, text, bigint, text, text);
+
+-- 2. Create unified 8-argument signature with default p_attempt = null
 create or replace function public.finish_v5_telegram_mirror_job(
   p_job_id uuid,
   p_agent_id text,
@@ -89,16 +93,33 @@ begin
 
     return j;
   else
-    update public.v5_jobs
-       set status = case when attempts >= max_attempts then 'failed' else 'queued' end,
-           locked_at = null,
-           locked_by = null,
-           last_error = coalesce(btrim(p_error), 'v5_mirror_failed'),
-           finished_at = case when attempts >= max_attempts then now_ts else null end,
-           available_at = case when attempts >= max_attempts then available_at else now_ts + interval '30 seconds' end,
-           updated_at = now_ts
-     where id = j.id
-     returning * into j;
+    if j.attempts >= j.max_attempts then
+      update public.v5_jobs
+         set status = 'failed',
+             last_error = left(coalesce(p_error,'telegram_mirror_failed'), 2000),
+             finished_at = now_ts,
+             locked_at = null,
+             locked_by = null,
+             updated_at = now_ts
+       where id = j.id
+       returning * into j;
+
+      update public.v5_media_assets
+         set status = 'failed',
+             last_error = left(coalesce(p_error,'telegram_mirror_failed'), 2000),
+             updated_at = now_ts
+       where id = j.asset_id;
+    else
+      update public.v5_jobs
+         set status = 'queued',
+             available_at = now_ts + make_interval(secs => least(300, greatest(30, j.attempts * 30))),
+             last_error = left(coalesce(p_error,'telegram_mirror_failed'), 2000),
+             locked_at = null,
+             locked_by = null,
+             updated_at = now_ts
+       where id = j.id
+       returning * into j;
+    end if;
 
     return j;
   end if;
