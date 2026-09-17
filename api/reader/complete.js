@@ -137,6 +137,10 @@ export default async function handler(req, res) {
         ok: body.ok === true,
         objectKey: body.object_key,
         bytes: safeProgress(body.bytes),
+        finalBytes: safeProgress(body.final_bytes) ?? safeProgress(body.bytes),
+        sourceBytes: safeProgress(body.source_bytes),
+        transformVersion: body.transform_version,
+        checksumSha256: body.checksum_sha256,
         etag: body.etag,
         error: body.error,
         telemetry: body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry) ? body.telemetry : null
