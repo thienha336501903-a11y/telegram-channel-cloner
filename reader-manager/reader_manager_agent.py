@@ -431,6 +431,16 @@ def run_job(config, job, stop_event, status_callback=None):
                 bytes_value = result.get("bytes")
                 if isinstance(bytes_value, int) and not isinstance(bytes_value, bool) and bytes_value >= 0:
                     completion["bytes"] = bytes_value
+                source_bytes_val = result.get("source_bytes")
+                if isinstance(source_bytes_val, int) and not isinstance(source_bytes_val, bool) and source_bytes_val >= 0:
+                    completion["source_bytes"] = source_bytes_val
+                final_bytes_val = result.get("final_bytes") or bytes_value
+                if isinstance(final_bytes_val, int) and not isinstance(final_bytes_val, bool) and final_bytes_val >= 0:
+                    completion["final_bytes"] = final_bytes_val
+                if result.get("transform_version"):
+                    completion["transform_version"] = str(result.get("transform_version"))
+                if result.get("checksum_sha256"):
+                    completion["checksum_sha256"] = str(result.get("checksum_sha256"))
                 completion["etag"] = str(result.get("etag") or "")[:300]
             if telem:
                 completion["telemetry"] = telem

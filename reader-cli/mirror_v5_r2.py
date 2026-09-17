@@ -7,6 +7,7 @@ upload both keep local checkpoints so a retry can continue instead of restarting
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -243,6 +244,24 @@ def is_mp4_container(file_path):
         return False
 
 
+def check_already_faststart(file_path):
+    if not is_mp4_container(file_path):
+        return False
+    try:
+        moov_ok, _ = check_moov_before_mdat(file_path)
+        return bool(moov_ok)
+    except Exception:
+        return False
+
+
+def compute_file_sha256(file_path):
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def resolve_binary(name):
     """Resolve an executable binary, prioritizing bundled {app}/bin over system PATH.
     Fail closed with faststart_dependency_missing if not found.
@@ -357,6 +376,7 @@ def remux_video_faststart(input_path, output_path):
         "-v", "error",
         "-y",
         "-i", str(input_path),
+        "-map", "0",
         "-c", "copy",
         "-movflags", "+faststart",
         "-f", "mp4",
@@ -757,6 +777,10 @@ def upload_resumable(local_path, object_key, asset_id, content_type, progress_fi
         print(f"R2 object already complete: {total_bytes} bytes", flush=True)
         return existing
 
+    existing_any = head_matching_object(client, bucket, object_key, None)
+    if existing_any and existing_any["bytes"] != total_bytes:
+        raise RuntimeError(f"v5_mirror_r2_size_conflict:{existing_any['bytes']}_vs_{total_bytes}")
+
     # Small object fast path (< 8 MiB) avoids 3-step multipart overhead
     if total_bytes < SMALL_OBJECT_THRESHOLD_BYTES:
         checkpoint_path.unlink(missing_ok=True)
@@ -848,15 +872,31 @@ async def run(args, timer=None):
     # acknowledge the existing object without downloading Telegram again.
     if expected > 0:
         existing = head_matching_object(r2_client(), bucket, args.object_key, expected)
+        manifest = load_cache_manifest(args.asset_id)
+        target_expected_bytes = expected
+        if not existing and manifest.get("faststart_size"):
+            target_expected_bytes = manifest["faststart_size"]
+            existing = head_matching_object(r2_client(), bucket, args.object_key, target_expected_bytes)
         if timer:
             timer.end_stage("r2_preflight_head")
         if existing:
-            clean_asset_cache(args.asset_id, local_name)
-            report_progress(progress_file, "r2_upload", expected, expected)
+            if getattr(args, "clean_cache_immediately", False):
+                clean_asset_cache(args.asset_id, local_name)
+            report_progress(progress_file, "r2_upload", target_expected_bytes, target_expected_bytes)
             print(f"R2 object already complete before retry: {expected} bytes", flush=True)
+            transform_ver = "ffmpeg-faststart-v1" if manifest.get("faststart_size") else "original-v1"
+            checksum_val = manifest.get("checksum_sha256")
+            if not checksum_val and (remux_path.exists() or local_path.exists()):
+                check_path = remux_path if (manifest.get("faststart_size") and remux_path.exists()) else local_path
+                if check_path.exists():
+                    checksum_val = compute_file_sha256(check_path)
             return {
                 "object_key": args.object_key,
                 "bytes": existing["bytes"],
+                "source_bytes": expected,
+                "final_bytes": existing["bytes"],
+                "transform_version": transform_ver,
+                "checksum_sha256": checksum_val or None,
                 "etag": existing["etag"],
                 "telemetry": {
                     "timings_ms": timer.timings if timer else {},
@@ -875,8 +915,8 @@ async def run(args, timer=None):
                     "finish_ms": None,
                     "total_ms": timer.total_elapsed_ms() if timer else 0,
                     "upload_method": "preflight_shortcircuit",
-                    "faststart_remuxed": False,
-                    "transform_version": "original-v1",
+                    "faststart_remuxed": bool(manifest.get("faststart_size")),
+                    "transform_version": transform_ver,
                     "cache_reused": "r2_complete",
                     "attempt": int(getattr(args, "attempt", 0) or 0),
                 },
@@ -884,13 +924,14 @@ async def run(args, timer=None):
     elif timer:
         timer.end_stage("r2_preflight_head")
 
+    report_progress(progress_file, "telegram_download", 0, expected)
+
+    manifest = load_cache_manifest(args.asset_id)
     is_photo = (
         args.media_variant == "thumbnail"
         or clean(args.mime_type).startswith("image/")
         or bool(re.search(r"\.(jpe?g|png|webp|gif)$", clean(args.original_filename), re.I))
     )
-
-    manifest = load_cache_manifest(args.asset_id)
     reused_download = can_reuse_download_cache(local_path, manifest, args.channel, args.message_id, expected, is_photo)
 
     if reused_download:
@@ -935,7 +976,8 @@ async def run(args, timer=None):
         save_cache_manifest(args.asset_id, {
             "channel": str(args.channel),
             "message_id": int(args.message_id),
-            "download_size": actual_bytes,
+            "source_size": actual_bytes,
+            "is_photo": is_photo,
         })
 
     is_video = (
@@ -960,6 +1002,12 @@ async def run(args, timer=None):
                 upload_path = remux_path
                 print(f"Reusing existing verified faststart remux cache: {upload_bytes} bytes", flush=True)
                 cache_reused = "faststart_remux"
+                faststart_remuxed = True
+            elif check_already_faststart(local_path):
+                upload_bytes = actual_bytes
+                upload_path = local_path
+                faststart_remuxed = False
+                print(f"Video already has moov before mdat (faststart already present): {upload_bytes} bytes", flush=True)
             else:
                 print(f"Remuxing MP4 with faststart: {local_path} -> {remux_path}", flush=True)
                 upload_bytes = remux_video_faststart(local_path, remux_path)
@@ -973,19 +1021,35 @@ async def run(args, timer=None):
                     "faststart_verified": True,
                 })
 
+        source_bytes = actual_bytes
+        if timer:
+            timer.start_stage("sha256_checksum")
+        checksum_sha256 = compute_file_sha256(upload_path)
+        if timer:
+            timer.end_stage("sha256_checksum")
+        if checksum_sha256 and is_video:
+            save_cache_manifest(args.asset_id, {
+                "channel": str(args.channel),
+                "message_id": int(args.message_id),
+                "faststart_size": upload_bytes if faststart_remuxed else None,
+                "faststart_verified": bool(faststart_remuxed),
+                "checksum_sha256": checksum_sha256,
+            })
+
         uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file, timer=timer)
         actual_bytes = upload_bytes
         if uploaded["bytes"] != actual_bytes:
             raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")
 
-        # Success: clean up cache for this completed asset
-        clean_asset_cache(args.asset_id, local_name)
+        # Prepared cache is kept until finish ACK, or cleaned if requested
+        if getattr(args, "clean_cache_immediately", False):
+            clean_asset_cache(args.asset_id, local_name)
         run_cache_gc(cache, active_asset_ids=[args.asset_id])
 
         timings = timer.timings if timer else {}
         dl_ms = timings.get("telegram_download", 0)
         up_ms = timings.get("r2_upload", 0)
-        dl_bytes = actual_bytes
+        dl_bytes = source_bytes
         up_bytes = upload_bytes
         dl_mbps = round((dl_bytes / (1024 * 1024)) / max(0.001, dl_ms / 1000.0), 2) if dl_ms > 0 else None
         up_mbps = round((up_bytes / (1024 * 1024)) / max(0.001, up_ms / 1000.0), 2) if up_ms > 0 else None
@@ -994,6 +1058,10 @@ async def run(args, timer=None):
         return {
             "object_key": args.object_key,
             "bytes": actual_bytes,
+            "source_bytes": source_bytes,
+            "final_bytes": upload_bytes,
+            "transform_version": transform_ver,
+            "checksum_sha256": checksum_sha256,
             "etag": uploaded["etag"],
             "telemetry": {
                 "timings_ms": timings,

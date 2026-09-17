@@ -249,6 +249,10 @@ def main():
                 completion.update({
                     "object_key": str(worker_result.get("object_key") or job["object_key"]),
                     "bytes": nonnegative_int(worker_result.get("bytes")),
+                    "source_bytes": nonnegative_int(worker_result.get("source_bytes")),
+                    "final_bytes": nonnegative_int(worker_result.get("final_bytes")),
+                    "transform_version": str(worker_result.get("transform_version") or "") or None,
+                    "checksum_sha256": str(worker_result.get("checksum_sha256") or "") or None,
                     "etag": str(worker_result.get("etag") or "")[:300],
                 })
 
