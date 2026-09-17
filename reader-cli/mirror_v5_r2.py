@@ -885,13 +885,18 @@ async def run(args, timer=None):
             report_progress(progress_file, "r2_upload", target_expected_bytes, target_expected_bytes)
             print(f"R2 object already complete before retry: {expected} bytes", flush=True)
             transform_ver = "ffmpeg-faststart-v1" if manifest.get("faststart_size") else "original-v1"
+            checksum_val = manifest.get("checksum_sha256")
+            if not checksum_val and (remux_path.exists() or local_path.exists()):
+                check_path = remux_path if (manifest.get("faststart_size") and remux_path.exists()) else local_path
+                if check_path.exists():
+                    checksum_val = compute_file_sha256(check_path)
             return {
                 "object_key": args.object_key,
                 "bytes": existing["bytes"],
                 "source_bytes": expected,
                 "final_bytes": existing["bytes"],
                 "transform_version": transform_ver,
-                "checksum_sha256": manifest.get("checksum_sha256") or None,
+                "checksum_sha256": checksum_val or None,
                 "etag": existing["etag"],
                 "telemetry": {
                     "timings_ms": timer.timings if timer else {},
@@ -1022,6 +1027,14 @@ async def run(args, timer=None):
         checksum_sha256 = compute_file_sha256(upload_path)
         if timer:
             timer.end_stage("sha256_checksum")
+        if checksum_sha256 and is_video:
+            save_cache_manifest(args.asset_id, {
+                "channel": str(args.channel),
+                "message_id": int(args.message_id),
+                "faststart_size": upload_bytes if faststart_remuxed else None,
+                "faststart_verified": bool(faststart_remuxed),
+                "checksum_sha256": checksum_sha256,
+            })
 
         uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file, timer=timer)
         actual_bytes = upload_bytes
