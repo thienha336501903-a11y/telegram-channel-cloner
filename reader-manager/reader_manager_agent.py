@@ -10,9 +10,17 @@ import threading
 import time
 from pathlib import Path
 
-import requests
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+except ImportError:
+    TelegramClient = None
+    StringSession = None
 
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL

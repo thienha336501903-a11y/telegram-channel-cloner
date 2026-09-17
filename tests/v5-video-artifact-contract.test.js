@@ -162,3 +162,55 @@ test('10. Artifact provenance contract updates media asset bytes and records res
   assert.match(jobsCode, /v5_media_assets\?id=eq\./);
   assert.match(jobsCode, /bytes:\s*validated\.finalBytes/);
 });
+
+test('11. validateReportedMirror rejects source size mismatch between reported source and DB asset', () => {
+  const asset = { id: 'asset-video-1', bytes: 10000000, mime_type: 'video/mp4' };
+  const expectedKey = 'media/v5/course-1/asset-video-1/video.mp4';
+
+  assert.throws(() => {
+    validateReportedMirror({
+      job: { id: 'job-1' },
+      asset,
+      objectKey: expectedKey,
+      finalBytes: 10000050,
+      sourceBytes: 9000000, // mismatch from asset.bytes (10000000)
+      transformVersion: 'ffmpeg-faststart-v1',
+      expectedObjectKey: expectedKey
+    });
+  }, /v5_mirror_source_size_mismatch:9000000\/10000000/);
+});
+
+test('12. validateReportedMirror rejects faststart transform on photos or thumbnails', () => {
+  const photoAsset = { id: 'asset-photo-1', bytes: 50000, mime_type: 'image/jpeg' };
+  const expectedKey = 'media/v5/course-1/asset-photo-1/photo.jpg';
+
+  assert.throws(() => {
+    validateReportedMirror({
+      job: { id: 'job-1' },
+      asset: photoAsset,
+      objectKey: expectedKey,
+      finalBytes: 50000,
+      sourceBytes: 50000,
+      transformVersion: 'ffmpeg-faststart-v1',
+      expectedObjectKey: expectedKey
+    });
+  }, /v5_mirror_faststart_not_supported_for_photos/);
+});
+
+test('13. validateReportedMirror requires known source bytes for ffmpeg-faststart-v1', () => {
+  const assetNoBytes = { id: 'asset-no-bytes', bytes: null, mime_type: 'video/mp4' };
+  const expectedKey = 'media/v5/course-1/asset-no-bytes/video.mp4';
+
+  assert.throws(() => {
+    validateReportedMirror({
+      job: { id: 'job-1' },
+      asset: assetNoBytes,
+      objectKey: expectedKey,
+      finalBytes: 50000,
+      sourceBytes: null,
+      transformVersion: 'ffmpeg-faststart-v1',
+      expectedObjectKey: expectedKey
+    });
+  }, /v5_mirror_source_bytes_required/);
+});
+
