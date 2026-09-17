@@ -10,9 +10,17 @@ import threading
 import time
 from pathlib import Path
 
-import requests
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+except ImportError:
+    TelegramClient = None
+    StringSession = None
 
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
@@ -104,6 +112,7 @@ def ready_profiles(config, allow_busy=False):
 
 _SOURCE_ACCESS_CACHE = {}  # (source_id, channel, profile_id) -> timestamp
 SOURCE_ACCESS_CACHE_TTL = 240  # 4 minutes
+_LAST_SOURCE_ACCESS_ERROR = None
 
 
 def invalidate_source_access_cache(source_id=None, channel=None, profile_id=None):
@@ -121,7 +130,69 @@ def invalidate_source_access_cache(source_id=None, channel=None, profile_id=None
         _SOURCE_ACCESS_CACHE.pop(k, None)
 
 
+def classify_telegram_error(error):
+    """Map Telegram/network exceptions to structured error taxonomy without disclosing secrets."""
+    if error is None:
+        return "reader_source_access_denied"
+    err_type = type(error).__name__ if isinstance(error, Exception) else ""
+    text = str(error or "").strip()
+    lower_text = text.lower()
+
+    # 1. FloodWait
+    if "floodwait" in lower_text or "flood_wait" in lower_text or err_type == "FloodWaitError":
+        wait_match = re.search(r"(\d+)\s*(?:seconds?|secs?|s)\b", lower_text)
+        seconds = wait_match.group(1) if wait_match else "30"
+        return f"reader_source_access_flood_wait_{seconds}s"
+
+    # 2. Unauthorized / Session revoked / Invalid
+    if any(k in lower_text for k in ("unauthorized", "sessionpasswordneeded", "phonenumberunoccupied", "userdeactivated", "session_revoked")) or err_type in ("SessionPasswordNeededError", "UnauthorizedError"):
+        return "reader_source_access_unauthorized"
+
+    # 3. Forbidden / Channel Private
+    if any(k in lower_text for k in ("forbidden", "channelprivate", "channel_private", "channel_invalid")) or err_type in ("ChannelPrivateError", "ChannelInvalidError"):
+        return "reader_source_access_forbidden"
+
+    # 4. Chat Admin Required
+    if "chatadminrequired" in lower_text or "chat_admin_required" in lower_text or err_type == "ChatAdminRequiredError":
+        return "reader_source_access_chat_admin_required"
+
+    # 5. AuthKey / Session invalid
+    if any(k in lower_text for k in ("authkey", "auth_key", "session_invalid", "security error")) or "auth" in err_type.lower():
+        return "reader_source_access_session_invalid"
+
+    # 6. Network / Timeout
+    if any(k in lower_text for k in ("timeout", "timed out", "connection reset", "connectionerror", "temporarily unavailable")) or "Timeout" in err_type or "Connection" in err_type:
+        return "reader_source_access_network_timeout"
+
+    # 7. Source missing / Username not occupied
+    if any(k in lower_text for k in ("usernamenotoccupied", "username_not_occupied", "source_missing", "channel_missing", "entity not found")) or err_type == "UsernameNotOccupiedError":
+        return "reader_source_access_source_missing"
+
+    # 8. Specific RPC error class
+    if "rpcerror" in lower_text or "rpc" in err_type.lower():
+        clean_cls = err_type.replace("Error", "").strip()
+        if not clean_cls or clean_cls == "Exception":
+            clean_cls = "rpc_generic"
+        return f"reader_source_access_rpc_error_{clean_cls.lower()}"
+
+    return "reader_source_access_denied"
+
+
+def save_finish_failure_log(job_id, failure_record):
+    """Persist structured finish API failure details to local diagnostic log."""
+    try:
+        log_dir = Path(__file__).resolve().parent / ".finish-failures"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
+        log_path = log_dir / f"failure_{clean_id}.json"
+        log_path.write_text(json.dumps(failure_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def choose_v5_profile(config, channel, source_id, allow_busy=False):
+    global _LAST_SOURCE_ACCESS_ERROR
+    _LAST_SOURCE_ACCESS_ERROR = None
     import asyncio
     now = time.time()
     for profile in ready_profiles(config, allow_busy=allow_busy):
@@ -134,10 +205,12 @@ def choose_v5_profile(config, channel, source_id, allow_busy=False):
             _SOURCE_ACCESS_CACHE[cache_key] = now
             api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": True})
             return profile
-        except Exception:
+        except Exception as exc:
             _SOURCE_ACCESS_CACHE.pop(cache_key, None)
+            err_code = classify_telegram_error(exc)
+            _LAST_SOURCE_ACCESS_ERROR = err_code
             try:
-                api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": False, "error": "reader_source_access_denied"})
+                api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": False, "error": err_code})
             except Exception:
                 pass
     return None
@@ -200,8 +273,9 @@ def run_job(config, job, stop_event, status_callback=None):
         is_benchmark = bool(job.get("benchmark"))
         profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
         if not profile:
-            api(config, "v5-mirror-finish", {"job_id": job_id, "ok": False, "error": "reader_source_access_denied"})
-            raise RuntimeError("reader_source_access_denied")
+            access_err = _LAST_SOURCE_ACCESS_ERROR or "reader_source_access_denied"
+            api(config, "v5-mirror-finish", {"job_id": job_id, "ok": False, "error": access_err})
+            raise RuntimeError(access_err)
         profile_id = str(profile["id"])
     else:
         profile_id = str(job.get("claimed_reader_profile_id") or job.get("assigned_reader_profile_id") or "")
@@ -220,9 +294,10 @@ def run_job(config, job, stop_event, status_callback=None):
             asyncio.run(verify_access(profile, channel))
             api(config, "source-access", {"profile_id": profile_id, "source_id": source_id, "ok": True})
         except Exception as exc:
-            api(config, "source-access", {"profile_id": profile_id, "source_id": source_id, "ok": False, "error": "reader_source_access_denied"})
-            api(config, "finish-job", {"job_id": job_id, "ok": False, "error": "reader_source_access_denied"})
-            raise RuntimeError("reader_source_access_denied") from exc
+            err_code = classify_telegram_error(exc)
+            api(config, "source-access", {"profile_id": profile_id, "source_id": source_id, "ok": False, "error": err_code})
+            api(config, "finish-job", {"job_id": job_id, "ok": False, "error": err_code})
+            raise RuntimeError(err_code) from exc
 
     api(config, "profile-status", {"profile_id": profile_id, "status": "busy"})
     env = os.environ.copy()
@@ -350,14 +425,37 @@ def run_job(config, job, stop_event, status_callback=None):
             if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
                 invalidate_source_access_cache(source_id, channel, profile_id)
             completion = {"job_id": job_id, "ok": ok, "error": error}
+            telem = result.get("telemetry") or {}
             if ok:
                 completion["object_key"] = str(result.get("object_key") or job.get("object_key") or "")
                 bytes_value = result.get("bytes")
                 if isinstance(bytes_value, int) and not isinstance(bytes_value, bool) and bytes_value >= 0:
                     completion["bytes"] = bytes_value
                 completion["etag"] = str(result.get("etag") or "")[:300]
-            api(config, "v5-mirror-finish", completion)
-            telem = result.get("telemetry") or {}
+            if telem:
+                completion["telemetry"] = telem
+
+            finish_start = time.time()
+            try:
+                api(config, "v5-mirror-finish", completion)
+            except Exception as finish_exc:
+                failure_record = {
+                    "job_id": job_id,
+                    "attempt": int(job.get("attempt") or 0),
+                    "error": str(finish_exc)[:1000],
+                    "object_key": completion.get("object_key"),
+                    "bytes": completion.get("bytes"),
+                    "telemetry": telem,
+                    "timestamp": time.time(),
+                }
+                save_finish_failure_log(job_id, failure_record)
+                print(f"V5 mirror finish API call failed for job {job_id}: {finish_exc}. Local failure logged.", flush=True)
+                raise
+
+            finish_ms = int((time.time() - finish_start) * 1000)
+            if "timings_ms" in telem:
+                telem["timings_ms"]["finish_ms"] = finish_ms
+
             timings = telem.get("timings_ms") or {}
             if ok:
                 print(f"V5 mirror job {job_id} succeeded in {telem.get('total_worker_time_ms', 0)}ms. Timings: {timings}", flush=True)
