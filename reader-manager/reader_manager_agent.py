@@ -25,7 +25,7 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
