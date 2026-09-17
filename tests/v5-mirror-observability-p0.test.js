@@ -74,7 +74,7 @@ test('sanitizeTelemetry preserves safe performance metrics and strips sensitive 
     },
     // Secret fields that must be stripped:
     session_string: '1BQAAAA=secret_token',
-    bot_token: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
+    bot_token: 'bot123456_dummy_token_to_strip',
     password: 'super_secret_password',
     api_hash: '0123456789abcdef0123456789abcdef'
   };
