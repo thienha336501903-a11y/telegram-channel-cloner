@@ -190,6 +190,93 @@ def save_finish_failure_log(job_id, failure_record):
         pass
 
 
+def finish_outbox_dir():
+    outbox = Path(__file__).resolve().parent / ".finish-outbox"
+    outbox.mkdir(parents=True, exist_ok=True)
+    return outbox
+
+
+def save_pending_finish(job_id, completion_payload):
+    """Save an unconfirmed finish completion to local outbox for recovery retry."""
+    try:
+        outbox = finish_outbox_dir()
+        clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
+        item_path = outbox / f"finish_{clean_id}.json"
+        attempt = completion_payload.get("attempt") if isinstance(completion_payload, dict) else None
+        item_path.write_text(json.dumps({
+            "job_id": job_id,
+            "attempt": attempt,
+            "completion": completion_payload,
+            "saved_at": time.time(),
+            "attempts": 0
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def remove_pending_finish(job_id):
+    """Remove a successfully confirmed finish item from local outbox."""
+    try:
+        outbox = finish_outbox_dir()
+        clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
+        item_path = outbox / f"finish_{clean_id}.json"
+        item_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def list_pending_finishes():
+    """List all pending unconfirmed finishes in outbox."""
+    try:
+        outbox = finish_outbox_dir()
+        items = []
+        for p in outbox.glob("finish_*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("job_id"):
+                    items.append((p, data))
+            except Exception:
+                pass
+        return items
+    except Exception:
+        return []
+
+
+def flush_pending_finishes(config):
+    """Attempt to replay and drain pending finish submissions before claiming new jobs."""
+    items = list_pending_finishes()
+    if not items:
+        return 0
+    replayed = 0
+    for path_obj, item in items:
+        job_id = item.get("job_id")
+        completion = item.get("completion")
+        if not job_id or not completion:
+            path_obj.unlink(missing_ok=True)
+            continue
+        attempt = completion.get("attempt") or item.get("attempt")
+        if not attempt:
+            print(f"Dropping outbox item without attempt for job {job_id}", flush=True)
+            path_obj.unlink(missing_ok=True)
+            continue
+        completion["attempt"] = int(attempt)
+        try:
+            print(f"Retrying pending finish from outbox for job {job_id}...", flush=True)
+            api(config, "v5-mirror-finish", completion, timeout=20)
+            path_obj.unlink(missing_ok=True)
+            replayed += 1
+            print(f"Successfully replayed pending finish for job {job_id}.", flush=True)
+        except Exception as exc:
+            err_str = str(exc)
+            if any(term in err_str for term in ("v5_mirror_lease_fenced", "not_owned", "v5_mirror_job_not_owned", "409", "410")):
+                print(f"Dropping obsolete pending finish for job {job_id}: {exc}", flush=True)
+                path_obj.unlink(missing_ok=True)
+            else:
+                print(f"Pending finish retry for job {job_id} failed: {exc}", flush=True)
+                break
+    return replayed
+
+
 def choose_v5_profile(config, channel, source_id, allow_busy=False):
     global _LAST_SOURCE_ACCESS_ERROR
     _LAST_SOURCE_ACCESS_ERROR = None
@@ -424,7 +511,13 @@ def run_job(config, job, stop_event, status_callback=None):
             error = None if ok else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000]
             if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
                 invalidate_source_access_cache(source_id, channel, profile_id)
-            completion = {"job_id": job_id, "ok": ok, "error": error}
+            attempt_val = job.get("attempt")
+            completion = {
+                "job_id": job_id,
+                "ok": ok,
+                "error": error,
+                "attempt": int(attempt_val or 0)
+            }
             telem = result.get("telemetry") or {}
             if ok:
                 completion["object_key"] = str(result.get("object_key") or job.get("object_key") or "")
@@ -448,7 +541,10 @@ def run_job(config, job, stop_event, status_callback=None):
             finish_start = time.time()
             try:
                 api(config, "v5-mirror-finish", completion)
+                remove_pending_finish(job_id)
             except Exception as finish_exc:
+                if ok:
+                    save_pending_finish(job_id, completion)
                 failure_record = {
                     "job_id": job_id,
                     "attempt": int(job.get("attempt") or 0),
@@ -459,7 +555,7 @@ def run_job(config, job, stop_event, status_callback=None):
                     "timestamp": time.time(),
                 }
                 save_finish_failure_log(job_id, failure_record)
-                print(f"V5 mirror finish API call failed for job {job_id}: {finish_exc}. Local failure logged.", flush=True)
+                print(f"V5 mirror finish API call failed for job {job_id}: {finish_exc}. Local failure and outbox logged.", flush=True)
                 raise
 
             finish_ms = int((time.time() - finish_start) * 1000)
@@ -673,7 +769,11 @@ def terminate_all_subprocesses():
         try:
             p.wait(timeout=5)
         except Exception:
-            pass
+            try:
+                p.kill()
+                p.wait(timeout=2)
+            except Exception:
+                pass
 
 
 def sync_remote_profiles(config):
@@ -713,6 +813,7 @@ def agent_loop(stop_event, status_callback=None):
                 continue
 
             config = sync_remote_profiles(config)
+            flush_pending_finishes(config)
             total_active, has_prod, benchmark_count = active_mirror_stats()
 
             backoff = mirror_backoff_remaining()

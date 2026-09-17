@@ -130,6 +130,10 @@ export default async function handler(req, res) {
 
   if (action === 'v5-mirror-finish') {
     if (!agentId) return json(res, 400, { ok: false, error: 'agent_id_required' });
+    const attempt = safeProgress(body.attempt);
+    if (attempt === null || attempt === undefined || attempt < 1) {
+      return json(res, 400, { ok: false, error: 'v5_mirror_attempt_required' });
+    }
     try {
       const job = await finishPhase4CanaryMirrorJob({
         jobId: body.job_id,
@@ -141,6 +145,7 @@ export default async function handler(req, res) {
         sourceBytes: safeProgress(body.source_bytes),
         transformVersion: body.transform_version,
         checksumSha256: body.checksum_sha256,
+        attempt,
         etag: body.etag,
         error: body.error,
         telemetry: body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry) ? body.telemetry : null
@@ -148,8 +153,12 @@ export default async function handler(req, res) {
       if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
       return json(res, 200, { ok: true, job });
     } catch (error) {
-      const status = String(error?.message || '').includes('not_owned') ? 409 : 500;
-      return json(res, status, { ok: false, error: String(error?.message || 'v5_mirror_finish_failed') });
+      const errMsg = String(error?.message || '');
+      const status = (errMsg.includes('not_owned') || errMsg.includes('lease_fenced')) ? 409 : 500;
+      return json(res, status, {
+        ok: false,
+        error: errMsg.includes('lease_fenced') ? 'v5_mirror_lease_fenced' : (errMsg || 'v5_mirror_finish_failed')
+      });
     }
   }
 
