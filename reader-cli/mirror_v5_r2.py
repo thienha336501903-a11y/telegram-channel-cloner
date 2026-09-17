@@ -860,8 +860,23 @@ async def run(args, timer=None):
                 "etag": existing["etag"],
                 "telemetry": {
                     "timings_ms": timer.timings if timer else {},
+                    "total_worker_time_ms": timer.total_elapsed_ms() if timer else 0,
+                    "claim_ms": None,
+                    "telegram_connect_ms": 0,
+                    "telegram_download_ms": 0,
+                    "telegram_bytes": existing["bytes"],
+                    "telegram_mbps": None,
+                    "prepare_ms": 0,
+                    "faststart_ms": 0,
+                    "verify_ms": 0,
+                    "r2_upload_ms": 0,
+                    "r2_bytes": existing["bytes"],
+                    "r2_mbps": None,
+                    "finish_ms": None,
+                    "total_ms": timer.total_elapsed_ms() if timer else 0,
                     "upload_method": "preflight_shortcircuit",
                     "faststart_remuxed": False,
+                    "transform_version": "original-v1",
                     "cache_reused": "r2_complete",
                     "attempt": int(getattr(args, "attempt", 0) or 0),
                 },
@@ -967,15 +982,38 @@ async def run(args, timer=None):
         clean_asset_cache(args.asset_id, local_name)
         run_cache_gc(cache, active_asset_ids=[args.asset_id])
 
+        timings = timer.timings if timer else {}
+        dl_ms = timings.get("telegram_download", 0)
+        up_ms = timings.get("r2_upload", 0)
+        dl_bytes = actual_bytes
+        up_bytes = upload_bytes
+        dl_mbps = round((dl_bytes / (1024 * 1024)) / max(0.001, dl_ms / 1000.0), 2) if dl_ms > 0 else None
+        up_mbps = round((up_bytes / (1024 * 1024)) / max(0.001, up_ms / 1000.0), 2) if up_ms > 0 else None
+        transform_ver = "ffmpeg-faststart-v1" if faststart_remuxed else "original-v1"
+
         return {
             "object_key": args.object_key,
             "bytes": actual_bytes,
             "etag": uploaded["etag"],
             "telemetry": {
-                "timings_ms": timer.timings if timer else {},
+                "timings_ms": timings,
                 "total_worker_time_ms": timer.total_elapsed_ms() if timer else 0,
+                "claim_ms": None,
+                "telegram_connect_ms": timings.get("telegram_connect", 0),
+                "telegram_download_ms": dl_ms,
+                "telegram_bytes": dl_bytes,
+                "telegram_mbps": dl_mbps,
+                "prepare_ms": timings.get("faststart_source_probe", 0),
+                "faststart_ms": timings.get("faststart_remux", 0),
+                "verify_ms": timings.get("faststart_output_probe_verify", 0),
+                "r2_upload_ms": up_ms,
+                "r2_bytes": up_bytes,
+                "r2_mbps": up_mbps,
+                "finish_ms": None,
+                "total_ms": timer.total_elapsed_ms() if timer else 0,
                 "upload_method": uploaded.get("upload_method", "multipart"),
                 "faststart_remuxed": faststart_remuxed,
+                "transform_version": transform_ver,
                 "cache_reused": cache_reused,
                 "attempt": int(getattr(args, "attempt", 0) or 0),
             },
