@@ -72,6 +72,7 @@ def run_worker(
     heartbeat_seconds,
     heartbeat_action="heartbeat",
     strip_reader_secret=False,
+    attempt=None,
 ):
     env = os.environ.copy()
     if strip_reader_secret:
@@ -83,11 +84,14 @@ def run_worker(
         now = time.time()
         if now - last_heartbeat >= heartbeat_seconds:
             try:
+                hb_payload = {"job_id": job_id, "agent_id": agent_id}
+                if attempt is not None:
+                    hb_payload["attempt"] = int(attempt)
                 post_json(
                     cloner_url,
                     control_path(heartbeat_action),
                     secret,
-                    {"job_id": job_id, "agent_id": agent_id},
+                    hb_payload,
                     timeout=20,
                 )
             except Exception as exc:
@@ -234,12 +238,15 @@ def main():
                     max(10, args.heartbeat_seconds),
                     heartbeat_action=heartbeat_action,
                     strip_reader_secret=job_type == "v5_mirror",
+                    attempt=int(job.get("attempt") or 1) if job_type == "v5_mirror" else None,
                 )
                 worker_result = read_worker_result(result_file) if result_required else {}
 
             ok = code == 0 and (not result_required or worker_result.get("ok", True) is True)
             error = None if ok else str(worker_result.get("error") or f"{job_type}_exit_{code}")[:2000]
             completion = {"job_id": job_id, "agent_id": args.agent_id, "ok": ok, "error": error}
+            if job_type == "v5_mirror":
+                completion["attempt"] = int(job.get("attempt") or 1)
 
             if job_type == "reconcile":
                 deleted_count = nonnegative_int(worker_result.get("deleted_count"))

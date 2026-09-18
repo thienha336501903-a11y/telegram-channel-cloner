@@ -109,17 +109,36 @@ export default async function handler(req, res) {
 
   if (action === 'v5-mirror-heartbeat') {
     if (!agentId) return json(res, 400, { ok: false, error: 'agent_id_required' });
-    const job = await heartbeatV5MirrorJob({
-      jobId: body.job_id,
-      agentId,
-      progressCurrent: safeProgress(body.progress_current),
-      progressTotal: safeProgress(body.progress_total),
-      progressStage: typeof body.progress_stage === 'string' ? body.progress_stage : null,
-      bytesPerSecond: safeProgress(body.bytes_per_second),
-      etaSeconds: safeProgress(body.eta_seconds)
-    });
-    if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
-    return json(res, 200, { ok: true, job });
+    const attempt = safeProgress(body.attempt);
+    if (attempt === null || attempt === undefined || attempt < 1) {
+      return json(res, 400, { ok: false, error: 'v5_mirror_attempt_required' });
+    }
+    try {
+      const job = await heartbeatV5MirrorJob({
+        jobId: body.job_id,
+        agentId,
+        attempt,
+        progressCurrent: safeProgress(body.progress_current),
+        progressTotal: safeProgress(body.progress_total),
+        progressStage: typeof body.progress_stage === 'string' ? body.progress_stage : null,
+        bytesPerSecond: safeProgress(body.bytes_per_second),
+        etaSeconds: safeProgress(body.eta_seconds)
+      });
+      if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
+      return json(res, 200, { ok: true, job });
+    } catch (error) {
+      const errMsg = String(error?.message || '');
+      if (errMsg === 'v5_mirror_attempt_required') {
+        return json(res, 400, { ok: false, error: 'v5_mirror_attempt_required' });
+      }
+      if (errMsg.includes('lease_fenced')) {
+        return json(res, 409, { ok: false, error: 'v5_mirror_lease_fenced' });
+      }
+      if (errMsg.includes('not_owned') || errMsg.includes('identity_required')) {
+        return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
+      }
+      return json(res, 500, { ok: false, error: errMsg || 'v5_mirror_heartbeat_failed' });
+    }
   }
 
   if (action === 'v5-mirror-finish') {
