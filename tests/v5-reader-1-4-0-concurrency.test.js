@@ -119,3 +119,18 @@ test('14. Benchmark/canary workers can share active local profile only through s
   assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
   assert.match(jobs, /production_canary: productionCanary/);
 });
+
+
+test('15. stale mirror leases do not block claim RPC recovery, while invalid timestamps fail closed', async () => {
+  const { isFreshMirrorLease } = await import('../lib/v5-mirror-jobs.js');
+  const now = Date.parse('2026-09-18T06:46:42.000Z');
+
+  assert.equal(isFreshMirrorLease('2026-09-18T06:29:07.718Z', now), false);
+  assert.equal(isFreshMirrorLease('2026-09-18T06:31:43.000Z', now), true);
+  assert.equal(isFreshMirrorLease('not-a-date', now), true);
+  assert.equal(isFreshMirrorLease(null, now), true);
+
+  assert.match(jobs, /select=id,course_id,asset_id,payload,locked_at/);
+  assert.match(jobs, /runningRows\.filter\(job => isFreshMirrorLease\(job\.locked_at\)\)/);
+  assert.match(jobs, /rpc\/claim_v5_telegram_mirror_job/);
+});
