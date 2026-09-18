@@ -9,6 +9,7 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = relativePath => fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
 const agent = read('reader-manager/reader_manager_agent.py');
 const installer = read('reader-manager/installer.iss');
+const gui = read('reader-manager/reader_manager_gui.py');
 
 function resolvePython() {
   if (process.env.PYTHON) return process.env.PYTHON;
@@ -23,9 +24,9 @@ function resolvePython() {
 const pythonBin = resolvePython();
 const managerDir = path.join(repoRoot, 'reader-manager').replace(/\\/g, '/');
 
-test('Reader 1.4.4 exposes explicit one-shot V5 mode without changing the default', () => {
-  assert.match(agent, /APP_VERSION = "1\.4\.4"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.4"/);
+test('Reader 1.4.5 exposes explicit one-shot V5 mode without changing the default', () => {
+  assert.match(agent, /APP_VERSION = "1\.4\.5"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.5"/);
   assert.match(agent, /YEUNAUAN_READER_V5_ONE_SHOT/);
   assert.match(agent, /ONE_SHOT_V5_CANARY_ENABLED/);
   assert.match(agent, /ONE_SHOT_V5_JOB_CLAIMED:/);
@@ -81,6 +82,7 @@ calls = {"claim_v5": 0, "generic": 0, "start": 0, "stats": 0, "terminate": 0}
 a.load_config = lambda: {"agent_token": "tok"}
 a.sync_remote_profiles = lambda c: c
 a.list_pending_finishes = lambda: []
+a.recover_busy_profiles_for_one_shot = lambda c: c
 a.mirror_backoff_remaining = lambda: 0
 a.can_claim_mirror = lambda: (True, "any")
 a.has_v5_r2_config = lambda c: True
@@ -160,6 +162,7 @@ calls = {"claim_v5": 0}
 a.load_config = lambda: {"agent_token": "tok"}
 a.sync_remote_profiles = lambda c: c
 a.list_pending_finishes = lambda: []
+a.recover_busy_profiles_for_one_shot = lambda c: c
 a.mirror_backoff_remaining = lambda: 0
 a.active_mirror_stats = lambda: (0, False, 0)
 a.can_claim_mirror = lambda: (True, "any")
@@ -243,4 +246,66 @@ print("NORMAL_MODE_GENERIC_PRIORITY_PASS")
   const res = spawnSync(pythonBin, ['-c', py], { cwd: repoRoot, encoding: 'utf8' });
   assert.equal(res.status, 0, res.stderr || res.stdout);
   assert.match(res.stdout, /NORMAL_MODE_GENERIC_PRIORITY_PASS/);
+});
+
+
+test('one-shot recovery changes only stale local busy profiles through authenticated profile-status API', () => {
+  const py = `
+import os, sys
+sys.path.insert(0, r'${managerDir}')
+import reader_manager_agent as a
+
+os.environ["YEUNAUAN_READER_V5_ONE_SHOT"] = "1"
+calls = []
+saved = []
+
+a.active_mirror_stats = lambda: (0, False, 0)
+a.api = lambda config, action, payload=None, timeout=45: calls.append((action, payload, timeout)) or {"ok": True}
+a.save_config = lambda config: saved.append(config.copy())
+
+config = {
+    "agent_token": "tok",
+    "profiles": [
+        {"id": "p-busy", "status": "busy", "session": "s"},
+        {"id": "p-ready", "status": "ready", "session": "s2"}
+    ]
+}
+
+out = a.recover_busy_profiles_for_one_shot(config)
+assert out["profiles"][0]["status"] == "ready"
+assert out["profiles"][1]["status"] == "ready"
+assert calls == [("profile-status", {"profile_id": "p-busy", "status": "ready"}, 20)]
+assert len(saved) == 1
+print("ONE_SHOT_BUSY_PROFILE_RECOVERY_PASS")
+`;
+  const res = spawnSync(pythonBin, ['-c', py], { cwd: repoRoot, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.match(res.stdout, /ONE_SHOT_BUSY_PROFILE_RECOVERY_PASS/);
+});
+
+test('busy profile recovery is disabled outside explicit one-shot mode', () => {
+  const py = `
+import os, sys
+sys.path.insert(0, r'${managerDir}')
+import reader_manager_agent as a
+
+os.environ.pop("YEUNAUAN_READER_V5_ONE_SHOT", None)
+a.api = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("API must not be called"))
+config = {"profiles": [{"id": "p-busy", "status": "busy", "session": "s"}]}
+out = a.recover_busy_profiles_for_one_shot(config)
+assert out["profiles"][0]["status"] == "busy"
+print("NORMAL_MODE_NO_BUSY_RECOVERY_PASS")
+`;
+  const res = spawnSync(pythonBin, ['-c', py], { cwd: repoRoot, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.match(res.stdout, /NORMAL_MODE_NO_BUSY_RECOVERY_PASS/);
+});
+
+test('GUI shutdown waits for agent cleanup instead of exiting immediately', () => {
+  assert.match(gui, /self\.agent_thread = None/);
+  assert.match(gui, /self\.stop_event, self\.agent_thread = start_background/);
+  assert.match(gui, /self\.stop_event\.set\(\)/);
+  assert.match(gui, /self\.agent_thread\.join\(timeout=12\)/);
+  assert.match(agent, /def wait_for_active_mirrors\(timeout=10\):/);
+  assert.match(agent, /terminate_all_subprocesses\(\)\s*\n\s*wait_for_active_mirrors\(timeout=10\)/);
 });
