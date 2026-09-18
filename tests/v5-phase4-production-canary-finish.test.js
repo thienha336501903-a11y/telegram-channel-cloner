@@ -16,7 +16,7 @@ test('Phase 4 finish wrapper is restricted to the exact approved course/source/m
 });
 
 test('all non-canary and failed jobs delegate to the unchanged production finish path', () => {
-  assert.match(finish, /import \{ finishV5MirrorJob \} from '\.\/v5-mirror-jobs\.js'/);
+  assert.match(finish, /import \{ finishV5MirrorJob(?:, safeProgress)? \} from '\.\/v5-mirror-jobs\.js'/);
   assert.match(finish, /if \(!context \|\| ok !== true\) \{\s*return finishV5MirrorJob/);
   assert.match(finish, /payload\.benchmark === true/);
 });
@@ -48,7 +48,7 @@ test('successful canary finish restores heartbeat telemetry after canonical RPC 
 });
 
 test('Reader finish endpoint keeps the Phase 4 wrapper while recovery serializes only the canary claim and heartbeat stays unchanged', () => {
-  assert.match(complete, /import \{ claimV5MirrorJob, heartbeatV5MirrorJob \} from '\.\.\/\.\.\/lib\/v5-mirror-jobs\.js'/);
+  assert.match(complete, /import \{ claimV5MirrorJob, heartbeatV5MirrorJob(?:, safeProgress)? \} from '\.\.\/\.\.\/lib\/v5-mirror-jobs\.js'/);
   assert.match(complete, /import \{ finishPhase4CanaryMirrorJob \} from '\.\.\/\.\.\/lib\/v5-phase4-canary-finish\.js'/);
   assert.match(complete, /const job = await finishPhase4CanaryMirrorJob\(\{/);
   assert.match(complete, /const job = phase4RecoverySerialJob\(await claimV5MirrorJob\(agentId\)\);/);

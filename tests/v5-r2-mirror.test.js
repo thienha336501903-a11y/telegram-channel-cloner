@@ -18,7 +18,7 @@ test('V5 mirror reuses the existing authenticated Reader control function', () =
   assert.match(control, /action === 'v5-mirror-heartbeat'/);
   assert.match(control, /action === 'v5-mirror-finish'/);
   assert.match(control, /capabilities\.includes\('v5_r2_mirror_v1'\)/);
-  assert.match(control, /value === null \|\| value === undefined \|\| value === '' \|\| typeof value === 'boolean'/);
+  assert.match(control + jobs, /value === null \|\| value === undefined \|\| value === '' \|\| typeof value === 'boolean'/);
 });
 
 test('mirror job ownership, object key, and reported bytes are enforced server-side', () => {

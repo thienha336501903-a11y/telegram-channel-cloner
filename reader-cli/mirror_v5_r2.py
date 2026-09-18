@@ -19,6 +19,17 @@ import sys
 import time
 from pathlib import Path
 
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 try:
     import boto3
     from botocore.config import Config
@@ -1126,7 +1137,7 @@ def main():
     try:
         result = asyncio.run(run(args, timer=timer))
         atomic_json(result_path, {"ok": True, **result})
-        print(f"V5 mirror complete: {result['bytes']} bytes → {result['object_key']}")
+        print(f"V5 mirror complete: {result['bytes']} bytes -> {result['object_key']}")
         return 0
     except Exception as exc:
         atomic_json(result_path, {

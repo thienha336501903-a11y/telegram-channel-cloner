@@ -10,16 +10,10 @@ import {
   reportReaderSourceAccess,
   updateReaderProfile
 } from '../../lib/reader-manager.js';
-import { claimV5MirrorJob, heartbeatV5MirrorJob } from '../../lib/v5-mirror-jobs.js';
+import { claimV5MirrorJob, heartbeatV5MirrorJob, safeProgress } from '../../lib/v5-mirror-jobs.js';
 import { finishPhase4CanaryMirrorJob } from '../../lib/v5-phase4-canary-finish.js';
 import { patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
-
-function safeProgress(value) {
-  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
-  const number = Number(value);
-  return Number.isSafeInteger(number) && number >= 0 ? number : null;
-}
 
 function phase4RecoverySerialJob(job) {
   if (!job || job.production_canary !== true) return job;
