@@ -18,6 +18,31 @@ import mirror_v5_r2 as mirror
 
 
 class ReaderRecoveryTests(unittest.TestCase):
+    def test_outbox_replay_waits_for_active_worker_to_exit(self):
+        class OnceEvent:
+            stopped = False
+
+            def is_set(self):
+                return self.stopped
+
+            def set(self):
+                self.stopped = True
+
+            def wait(self, seconds):
+                self.stopped = True
+
+        actions = []
+        with patch.object(agent, "load_config", return_value={"agent_token": "test"}), \
+             patch.object(agent, "sync_remote_profiles", side_effect=lambda config: config), \
+             patch.object(agent, "active_mirror_stats", return_value=(1, True, 0)), \
+             patch.object(agent, "flush_pending_finishes", side_effect=lambda config: actions.append("replay")), \
+             patch.object(agent, "can_claim_mirror", return_value=(False, None)), \
+             patch.object(agent, "mirror_backoff_remaining", return_value=0), \
+             patch.object(agent, "terminate_all_subprocesses"), \
+             patch.object(agent, "wait_for_active_mirrors"):
+            agent.agent_loop(OnceEvent())
+        self.assertEqual(actions, [])
+
     def test_exact_indexed_photo_variant_and_size_check(self):
         small = SimpleNamespace(type="x", size=73_547, w=900, h=900)
         large = SimpleNamespace(type="y", size=90_738, w=1024, h=1024)

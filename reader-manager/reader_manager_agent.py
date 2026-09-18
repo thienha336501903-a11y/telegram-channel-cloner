@@ -1068,7 +1068,9 @@ def agent_loop(stop_event, status_callback=None):
                     stop_event.set()
                     break
                 config = recover_busy_profiles_for_one_shot(config)
-            else:
+            elif active_mirror_stats()[0] == 0:
+                # The worker may be submitting its own finish right now. Replay
+                # only after it has left the active slot to avoid parallel RPCs.
                 flush_pending_finishes(config)
                 if list_pending_finishes():
                     stop_event.wait(5)
