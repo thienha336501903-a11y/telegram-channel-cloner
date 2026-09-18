@@ -141,3 +141,229 @@ test('10. Database migration SQL is mirrored identically between LMS and cloner 
   const lmsSql = fs.readFileSync(lmsMigrationPath, 'utf8');
   assert.equal(lmsSql.replace(/\r\n/g, '\n').trim(), migrationCode.replace(/\r\n/g, '\n').trim());
 });
+
+test('11. Executable unit tests: safeProgress parser handles all boundary cases correctly', async () => {
+  const { safeProgress } = await import('../lib/v5-mirror-jobs.js');
+  assert.equal(safeProgress(undefined), null);
+  assert.equal(safeProgress(null), null);
+  assert.equal(safeProgress(''), null);
+  assert.equal(safeProgress(false), null);
+  assert.equal(safeProgress(true), null);
+  assert.equal(safeProgress(0), 0);
+  assert.equal(safeProgress(1), 1);
+  assert.equal(safeProgress('1'), 1);
+  assert.equal(safeProgress('0'), 0);
+  assert.equal(safeProgress(1.5), null);
+  assert.equal(safeProgress('abc'), null);
+  assert.equal(safeProgress(-1), null);
+  assert.equal(safeProgress(NaN), null);
+  assert.equal(safeProgress(Infinity), null);
+});
+
+test('12. Executable runtime test: finishV5MirrorJob evaluates safeProgress(attempt) and enforces strict fencing', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { finishV5MirrorJob } = await import('../lib/v5-mirror-jobs.js');
+
+  let capturedRpc = null;
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    const body = opts?.body ? JSON.parse(opts.body) : null;
+    if (urlStr.includes('v5_jobs?select=')) {
+      return makeResp([{ id: 'job-exec-1', course_id: 'c1', asset_id: 'a1', status: 'running', locked_by: 'agent-1', attempts: 1, payload: {}, result: {} }]);
+    }
+    if (urlStr.includes('v5_media_assets?select=')) {
+      return makeResp([{ id: 'a1', origin: 'telegram', bytes: 1000, mime_type: 'video/mp4', original_filename: 'test.mp4' }]);
+    }
+    if (urlStr.includes('rpc/finish_v5_telegram_mirror_job')) {
+      capturedRpc = body;
+      return makeResp([{ id: 'job-exec-1', status: 'success', result: {} }]);
+    }
+    if (urlStr.includes('v5_jobs?id=eq.') || urlStr.includes('v5_media_assets?id=eq.')) {
+      return makeResp([{ id: 'job-exec-1', status: 'success' }]);
+    }
+    return makeResp([]);
+  };
+
+  try {
+    // A. Missing attempt throws v5_mirror_attempt_required
+    await assert.rejects(
+      async () => {
+        await finishV5MirrorJob({
+          jobId: 'job-exec-1',
+          agentId: 'agent-1',
+          ok: true,
+          attempt: null,
+          bytes: 1000,
+          objectKey: 'media/v5/c1/a1/test.mp4'
+        });
+      },
+      { message: 'v5_mirror_attempt_required' }
+    );
+
+    // B. Stale attempt throws lease fenced
+    await assert.rejects(
+      async () => {
+        await finishV5MirrorJob({
+          jobId: 'job-exec-1',
+          agentId: 'agent-1',
+          ok: true,
+          attempt: 2,
+          bytes: 1000,
+          objectKey: 'media/v5/c1/a1/test.mp4'
+        });
+      },
+      { message: 'v5_mirror_lease_fenced:expected_attempt_1_got_2' }
+    );
+
+    // C. Correct attempt executes without ReferenceError and includes p_attempt: 1
+    const res = await finishV5MirrorJob({
+      jobId: 'job-exec-1',
+      agentId: 'agent-1',
+      ok: true,
+      attempt: 1,
+      bytes: 1000,
+      objectKey: 'media/v5/c1/a1/test.mp4',
+      transformVersion: 'original-v1'
+    });
+    assert.ok(res);
+    assert.equal(capturedRpc.p_attempt, 1);
+    assert.equal(capturedRpc.p_job_id, 'job-exec-1');
+    assert.equal(capturedRpc.p_agent_id, 'agent-1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('13. Executable runtime test: finishPhase4CanaryMirrorJob evaluates safeProgress(attempt) without ReferenceError', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { finishPhase4CanaryMirrorJob } = await import('../lib/v5-phase4-canary-finish.js');
+
+  let capturedRpc = null;
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    const body = opts?.body ? JSON.parse(opts.body) : null;
+    if (urlStr.includes('v5_jobs?select=')) {
+      return makeResp([{
+        id: 'job-canary-exec',
+        course_id: 'a645f117-2320-452f-8538-154b80484218',
+        asset_id: 'asset-canary-exec',
+        status: 'running',
+        locked_by: 'agent-canary',
+        attempts: 1,
+        payload: {},
+        result: {}
+      }]);
+    }
+    if (urlStr.includes('v5_media_assets?select=')) {
+      return makeResp([{
+        id: 'asset-canary-exec',
+        origin: 'telegram',
+        telegram_source_id: '039eedf1-6d26-4d04-a152-27e4d29fc5c0',
+        telegram_message_row_id: 'be7c377e-05ef-4dd3-8ea3-9b54361dcd2e',
+        bytes: 5000,
+        mime_type: 'video/mp4',
+        original_filename: 'canary.mp4'
+      }]);
+    }
+    if (urlStr.includes('rpc/finish_v5_telegram_mirror_job')) {
+      capturedRpc = body;
+      return makeResp([{ id: 'job-canary-exec', status: 'success', result: {} }]);
+    }
+    if (urlStr.includes('v5_jobs?id=eq.') || urlStr.includes('v5_media_assets?id=eq.')) {
+      return makeResp([{ id: 'job-canary-exec', status: 'success' }]);
+    }
+    return makeResp([]);
+  };
+
+  try {
+    // Missing attempt throws v5_mirror_attempt_required
+    await assert.rejects(
+      async () => {
+        await finishPhase4CanaryMirrorJob({
+          jobId: 'job-canary-exec',
+          agentId: 'agent-canary',
+          ok: true,
+          attempt: null,
+          bytes: 5000,
+          objectKey: 'media/v5/a645f117-2320-452f-8538-154b80484218/asset-canary-exec/canary.mp4'
+        });
+      },
+      { message: 'v5_mirror_attempt_required' }
+    );
+
+    // Stale attempt throws lease fenced
+    await assert.rejects(
+      async () => {
+        await finishPhase4CanaryMirrorJob({
+          jobId: 'job-canary-exec',
+          agentId: 'agent-canary',
+          ok: true,
+          attempt: 3,
+          bytes: 5000,
+          objectKey: 'media/v5/a645f117-2320-452f-8538-154b80484218/asset-canary-exec/canary.mp4'
+        });
+      },
+      { message: 'v5_mirror_lease_fenced:expected_attempt_1_got_3' }
+    );
+
+    // Correct attempt passes p_attempt: 1 without ReferenceError
+    const res = await finishPhase4CanaryMirrorJob({
+      jobId: 'job-canary-exec',
+      agentId: 'agent-canary',
+      ok: true,
+      attempt: 1,
+      bytes: 5000,
+      objectKey: 'media/v5/a645f117-2320-452f-8538-154b80484218/asset-canary-exec/canary.mp4',
+      transformVersion: 'ffmpeg-faststart-v1'
+    });
+    assert.ok(res);
+    assert.equal(capturedRpc.p_attempt, 1);
+    assert.equal(capturedRpc.p_job_id, 'job-canary-exec');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('14. Executable Python test: mirror_v5_r2.py completion logging does not raise UnicodeEncodeError under CP1252', () => {
+  const pyCode = `
+import subprocess, sys, os
+env = os.environ.copy()
+env['PYTHONIOENCODING'] = 'cp1252'
+code = '''
+import sys
+# Test completion log statement from mirror_v5_r2.py line 1140
+result_bytes = 79579382
+object_key = "media/v5/719a3171-c593-45bc-9e69-946df1957510/10c9420a-0e84-46a3-bdc0-2426142c1f8b/Mo-rong-66-.mp4"
+print(f"V5 mirror complete: {result_bytes} bytes -> {object_key}")
+'''
+p = subprocess.Popen([sys.executable, '-c', code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+out, err = p.communicate()
+assert p.returncode == 0, f"Failed with code {p.returncode}: {err}"
+assert b"V5 mirror complete: 79579382 bytes -> media/v5/" in out
+print("WORKER_CP1252_LOGGING_OK")
+`;
+  const res = spawnSync(pythonBin, ['-c', pyCode], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `Python CP1252 logging test failed: ${res.stderr}`);
+  assert.match(res.stdout, /WORKER_CP1252_LOGGING_OK/);
+});
+

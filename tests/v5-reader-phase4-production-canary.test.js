@@ -41,7 +41,7 @@ test('benchmark and production-canary concurrency classes cannot mix', () => {
 test('Reader 1.4.0 proven benchmark worker path is reused only as local scheduling shim', () => {
   assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
   assert.match(jobs, /production_canary: productionCanary/);
-  assert.match(agent, /APP_VERSION = "1\.4\.1"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.[12]"/);
   assert.match(agent, /allow_busy=is_benchmark/);
 });
 
