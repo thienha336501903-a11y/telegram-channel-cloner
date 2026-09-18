@@ -21,6 +21,7 @@ class ReaderManagerApp(tk.Tk):
         self.geometry("760x570")
         self.minsize(680, 480)
         self.stop_event = None
+        self.agent_thread = None
         self.status_text = tk.StringVar(value="Chưa kết nối")
         self.r2_status_text = tk.StringVar(value="R2 V5: chưa cấu hình")
         self._build()
@@ -222,7 +223,7 @@ class ReaderManagerApp(tk.Tk):
     def ensure_agent(self):
         if self.stop_event or not self.config_value().get("agent_token"):
             return
-        self.stop_event, _thread = start_background(lambda value: self.after(0, self.status_text.set, value))
+        self.stop_event, self.agent_thread = start_background(lambda value: self.after(0, self.status_text.set, value))
 
     @staticmethod
     def friendly_error(exc):
@@ -240,6 +241,8 @@ class ReaderManagerApp(tk.Tk):
     def destroy(self):
         if self.stop_event:
             self.stop_event.set()
+        if self.agent_thread and self.agent_thread.is_alive():
+            self.agent_thread.join(timeout=12)
         super().destroy()
 
 

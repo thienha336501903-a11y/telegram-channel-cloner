@@ -25,7 +25,7 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -888,6 +888,21 @@ def terminate_all_subprocesses():
                 pass
 
 
+def wait_for_active_mirrors(timeout=10):
+    deadline = time.time() + max(0, float(timeout))
+    while time.time() < deadline:
+        with _ACTIVE_MIRRORS_LOCK:
+            threads = [info.get("thread") for info in _ACTIVE_MIRRORS.values() if info.get("thread")]
+        if not threads:
+            return True
+        for thread in threads:
+            try:
+                thread.join(timeout=min(0.25, max(0, deadline - time.time())))
+            except Exception:
+                pass
+    return active_mirror_stats()[0] == 0
+
+
 def sync_remote_profiles(config):
     try:
         heartbeat = api(
@@ -916,6 +931,29 @@ def sync_remote_profiles(config):
     return config
 
 
+def recover_busy_profiles_for_one_shot(config):
+    """Recover stale local profile state only in explicit one-shot recovery mode."""
+    if not one_shot_v5_enabled():
+        return config
+    if active_mirror_stats()[0] != 0:
+        raise RuntimeError("one_shot_profile_recovery_active_mirror")
+    changed = False
+    for profile in config.get("profiles", []):
+        if str(profile.get("status") or "ready") != "busy":
+            continue
+        profile_id = str(profile.get("id") or "").strip()
+        if not profile_id:
+            continue
+        api(config, "profile-status", {"profile_id": profile_id, "status": "ready"}, timeout=20)
+        profile["status"] = "ready"
+        changed = True
+        print(f"ONE_SHOT_V5_PROFILE_RECOVERED:{profile_id}", flush=True)
+    if changed:
+        with _CONFIG_WRITE_LOCK:
+            save_config(config)
+    return config
+
+
 def agent_loop(stop_event, status_callback=None):
     one_shot_v5 = one_shot_v5_enabled()
     one_shot_claimed = False
@@ -937,6 +975,7 @@ def agent_loop(stop_event, status_callback=None):
                     print("ONE_SHOT_V5_BLOCKED_PENDING_FINISH_OUTBOX", flush=True)
                     stop_event.set()
                     break
+                config = recover_busy_profiles_for_one_shot(config)
             else:
                 flush_pending_finishes(config)
 
@@ -1014,6 +1053,7 @@ def agent_loop(stop_event, status_callback=None):
             stop_event.wait(15)
 
     terminate_all_subprocesses()
+    wait_for_active_mirrors(timeout=10)
     if one_shot_v5:
         print("ONE_SHOT_V5_STOPPED", flush=True)
 
