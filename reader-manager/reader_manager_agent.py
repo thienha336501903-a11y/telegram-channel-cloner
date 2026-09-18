@@ -25,7 +25,7 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -67,6 +67,31 @@ def local_r2_config(config):
 def has_v5_r2_config(config):
     r2 = local_r2_config(config)
     return all(str(r2.get(key) or "").strip() for key in ("account_id", "access_key_id", "secret_access_key", "bucket"))
+
+
+def one_shot_v5_enabled():
+    value = str(os.environ.get("YEUNAUAN_READER_V5_ONE_SHOT") or "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def required_job_attempt(job):
+    value = job.get("attempt") if isinstance(job, dict) else None
+    if value is None or isinstance(value, bool):
+        raise RuntimeError("v5_mirror_attempt_required")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not re.fullmatch(r"[1-9]\d*", stripped):
+            raise RuntimeError("v5_mirror_attempt_required")
+        parsed = int(stripped)
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float) and value.is_integer():
+        parsed = int(value)
+    else:
+        raise RuntimeError("v5_mirror_attempt_required")
+    if parsed < 1:
+        raise RuntimeError("v5_mirror_attempt_required")
+    return parsed
 
 
 def reader_capabilities(config):
@@ -395,26 +420,18 @@ def run_job(config, job, stop_event, status_callback=None):
     if not job_id or not channel:
         raise RuntimeError("reader_job_missing_identity")
 
+    parsed_job_attempt = required_job_attempt(job) if job_type == "v5_mirror" else None
+
     if job_type == "v5_mirror":
         is_benchmark = bool(job.get("benchmark"))
         profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
         if not profile:
             access_err = _LAST_SOURCE_ACCESS_ERROR or "reader_source_access_denied"
-            attempt_val = job.get("attempt")
-            try:
-                parsed_attempt = int(attempt_val) if attempt_val is not None else None
-            except (TypeError, ValueError):
-                parsed_attempt = None
-
-            if parsed_attempt is None or parsed_attempt < 1:
-                print(f"[WARN] Cannot report source access failure for job {job_id}: missing or invalid attempt ({attempt_val})", flush=True)
-                raise RuntimeError(access_err)
-
             api(config, "v5-mirror-finish", {
                 "job_id": job_id,
                 "ok": False,
                 "error": access_err,
-                "attempt": parsed_attempt
+                "attempt": parsed_job_attempt
             })
             raise RuntimeError(access_err)
         profile_id = str(profile["id"])
@@ -482,7 +499,7 @@ def run_job(config, job, stop_event, status_callback=None):
                     "--media-variant", str(job.get("media_variant") or "media"),
                     "--progress-file", str(progress_file),
                     "--result-file", str(result_file),
-                    "--attempt", str(int(job.get("attempt") or 0)),
+                    "--attempt", str(parsed_job_attempt),
                     "--start-time", str(time.time()),
                 ]
                 stage = "mirroring_r2"
@@ -522,10 +539,9 @@ def run_job(config, job, stop_event, status_callback=None):
                     if job_type == "v5_mirror":
                         current, total, stage = progress_info(progress_file)
                         telem = progress_telemetry(progress_file)
-                        attempt_val = job.get("attempt")
                         payload = {
                             "job_id": job_id,
-                            "attempt": int(attempt_val or 1)
+                            "attempt": parsed_job_attempt
                         }
                         if current is not None:
                             payload["progress_current"] = current
@@ -582,33 +598,26 @@ def run_job(config, job, stop_event, status_callback=None):
         if job_type == "v5_mirror":
             if lease_lost:
                 print(f"[ERROR] Job {job_id} aborted due to heartbeat lease failure. Not submitting success.", flush=True)
-                attempt_val = job.get("attempt")
                 try:
-                    parsed_attempt = int(attempt_val) if attempt_val is not None else None
-                except (TypeError, ValueError):
-                    parsed_attempt = None
-                if parsed_attempt is not None and parsed_attempt >= 1:
-                    try:
-                        api(config, "v5-mirror-finish", {
-                            "job_id": job_id,
-                            "ok": False,
-                            "error": "heartbeat_lease_lost",
-                            "attempt": parsed_attempt
-                        })
-                    except Exception:
-                        pass
+                    api(config, "v5-mirror-finish", {
+                        "job_id": job_id,
+                        "ok": False,
+                        "error": "heartbeat_lease_lost",
+                        "attempt": parsed_job_attempt
+                    })
+                except Exception:
+                    pass
                 raise RuntimeError("heartbeat_lease_lost")
 
             ok = code == 0 and result.get("ok") is True
             error = None if ok else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000]
             if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
                 invalidate_source_access_cache(source_id, channel, profile_id)
-            attempt_val = job.get("attempt")
             completion = {
                 "job_id": job_id,
                 "ok": ok,
                 "error": error,
-                "attempt": int(attempt_val or 0)
+                "attempt": parsed_job_attempt
             }
             telem = result.get("telemetry") or {}
             if ok:
@@ -648,7 +657,7 @@ def run_job(config, job, stop_event, status_callback=None):
                     save_pending_finish(job_id, completion)
                 failure_record = {
                     "job_id": job_id,
-                    "attempt": int(job.get("attempt") or 0),
+                    "attempt": parsed_job_attempt,
                     "error": str(finish_exc)[:1000],
                     "object_key": completion.get("object_key"),
                     "bytes": completion.get("bytes"),
@@ -908,6 +917,12 @@ def sync_remote_profiles(config):
 
 
 def agent_loop(stop_event, status_callback=None):
+    one_shot_v5 = one_shot_v5_enabled()
+    one_shot_claimed = False
+
+    if one_shot_v5:
+        print("ONE_SHOT_V5_CANARY_ENABLED", flush=True)
+
     while not stop_event.is_set():
         try:
             config = load_config()
@@ -916,8 +931,21 @@ def agent_loop(stop_event, status_callback=None):
                 continue
 
             config = sync_remote_profiles(config)
-            flush_pending_finishes(config)
+
+            if one_shot_v5:
+                if list_pending_finishes():
+                    print("ONE_SHOT_V5_BLOCKED_PENDING_FINISH_OUTBOX", flush=True)
+                    stop_event.set()
+                    break
+            else:
+                flush_pending_finishes(config)
+
             total_active, has_prod, benchmark_count = active_mirror_stats()
+
+            if one_shot_v5 and one_shot_claimed and total_active == 0:
+                print("ONE_SHOT_V5_COMPLETE", flush=True)
+                stop_event.set()
+                break
 
             backoff = mirror_backoff_remaining()
             if backoff > 0 and total_active == 0:
@@ -927,8 +955,8 @@ def agent_loop(stop_event, status_callback=None):
                 continue
 
             # Generic import/reconcile remains exclusive and always has priority
-            # when no mirrors are active. It never overlaps mirror workers.
-            if total_active == 0:
+            # during normal operation. One-shot V5 mode never claims generic work.
+            if total_active == 0 and not one_shot_v5:
                 generic_job = claim_generic_job(config)
                 if generic_job:
                     run_job(config, generic_job, stop_event, status_callback)
@@ -937,30 +965,30 @@ def agent_loop(stop_event, status_callback=None):
 
             # Evaluate mirror concurrency slots
             can_claim, slot_type = can_claim_mirror()
-            if can_claim:
+            if can_claim and not (one_shot_v5 and one_shot_claimed):
                 job = claim_v5_job(config)
                 if job:
+                    if one_shot_v5:
+                        # Lock the one-shot boundary at CLAIM TIME so failure cannot
+                        # fall through to a second production claim.
+                        one_shot_claimed = True
+                        print(f"ONE_SHOT_V5_JOB_CLAIMED:{job.get('id')}", flush=True)
+                        required_job_attempt(job)
+
                     is_benchmark = bool(job.get("benchmark"))
                     if slot_type == "benchmark_only" and not is_benchmark:
                         # Defensive: production job claimed while a benchmark job is running.
                         # Safely release it back to the queue with authenticated finish(ok=False) and exact attempt.
-                        attempt_val = job.get("attempt")
                         try:
-                            parsed_attempt = int(attempt_val) if attempt_val is not None else None
-                        except (TypeError, ValueError):
-                            parsed_attempt = None
-                        if parsed_attempt is not None and parsed_attempt >= 1:
-                            try:
-                                api(config, "v5-mirror-finish", {
-                                    "job_id": job.get("id"),
-                                    "ok": False,
-                                    "error": "benchmark_slot_mismatch",
-                                    "attempt": parsed_attempt
-                                })
-                            except Exception as release_exc:
-                                print(f"[WARN] Failed to release mismatched job {job.get('id')}: {release_exc}", flush=True)
-                        else:
-                            print(f"[ERROR] Cannot release mismatched job {job.get('id')}: missing attempt generation", flush=True)
+                            parsed_attempt = required_job_attempt(job)
+                            api(config, "v5-mirror-finish", {
+                                "job_id": job.get("id"),
+                                "ok": False,
+                                "error": "benchmark_slot_mismatch",
+                                "attempt": parsed_attempt
+                            })
+                        except Exception as release_exc:
+                            print(f"[WARN] Failed to release mismatched job {job.get('id')}: {release_exc}", flush=True)
                     else:
                         start_mirror_job(config, job, stop_event, status_callback)
                         total_active, has_prod, benchmark_count = active_mirror_stats()
@@ -986,7 +1014,8 @@ def agent_loop(stop_event, status_callback=None):
             stop_event.wait(15)
 
     terminate_all_subprocesses()
-
+    if one_shot_v5:
+        print("ONE_SHOT_V5_STOPPED", flush=True)
 
 def start_background(status_callback=None):
     stop_event = threading.Event()
