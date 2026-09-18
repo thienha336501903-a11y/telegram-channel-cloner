@@ -103,8 +103,8 @@ test('12. Existing Reader config from 1.3.4 loads seamlessly in 1.4.0', () => {
   assert.match(storage, /def load_config\(\):/);
   assert.match(storage, /value\.get\("version"\) != 1/);
   assert.match(storage, /value\.setdefault\("profiles", \[\]\)/);
-  assert.match(agent, /APP_VERSION = "1\.4\.[1-5]"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.[1-5]"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.[1-6]"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.[1-6]"/);
 });
 
 test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
