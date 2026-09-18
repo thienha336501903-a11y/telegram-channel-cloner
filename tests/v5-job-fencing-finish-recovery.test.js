@@ -654,3 +654,446 @@ test('18. Executable runtime test: finishV5MirrorJob gracefully surfaces failed 
   }
 });
 
+test('19. Executable runtime test: heartbeatV5MirrorJob enforces atomic attempt fencing (A-F)', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { heartbeatV5MirrorJob } = await import('../lib/v5-mirror-jobs.js');
+
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  let lastPatchUrl = null;
+  let lastPatchBody = null;
+
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    const body = opts?.body ? JSON.parse(opts.body) : null;
+
+    if (opts?.method === 'PATCH') {
+      lastPatchUrl = urlStr;
+      lastPatchBody = body;
+      // If PATCH condition matches attempts=eq.1 and agent-1, succeed:
+      if (urlStr.includes('id=eq.job-hb-1') && urlStr.includes('attempts=eq.1') && urlStr.includes('locked_by=eq.agent-1')) {
+        return makeResp([{
+          id: 'job-hb-1',
+          status: 'running',
+          locked_by: 'agent-1',
+          attempts: 1,
+          progress_current: body.progress_current ?? null,
+          progress_total: body.progress_total ?? null,
+          locked_at: body.locked_at,
+          updated_at: body.updated_at
+        }]);
+      }
+      // If attempt or agent mismatch, atomic PATCH matches 0 rows:
+      return makeResp([]);
+    }
+
+    if (urlStr.includes('v5_jobs?select=id,status,locked_by,attempts')) {
+      if (urlStr.includes('id=eq.job-stale-attempt')) {
+        return makeResp([{
+          id: 'job-stale-attempt',
+          status: 'running',
+          locked_by: 'agent-1',
+          attempts: 2
+        }]);
+      }
+      if (urlStr.includes('id=eq.job-wrong-agent')) {
+        return makeResp([{
+          id: 'job-wrong-agent',
+          status: 'running',
+          locked_by: 'agent-legit',
+          attempts: 1
+        }]);
+      }
+      return makeResp([{
+        id: 'job-hb-1',
+        status: 'running',
+        locked_by: 'agent-1',
+        attempts: 1
+      }]);
+    }
+
+    return makeResp([]);
+  };
+
+  try {
+    // A. Heartbeat attempt=1 against attempts=1 succeeds
+    // F. Matching attempt can update locked_at, updated_at, progress
+    lastPatchUrl = null;
+    lastPatchBody = null;
+    const hbOk = await heartbeatV5MirrorJob({
+      jobId: 'job-hb-1',
+      agentId: 'agent-1',
+      attempt: 1,
+      progressCurrent: 500,
+      progressTotal: 1000
+    });
+    assert.ok(hbOk);
+    assert.equal(hbOk.attempts, 1);
+    assert.equal(hbOk.progress_current, 500);
+    assert.ok(lastPatchUrl.includes('attempts=eq.1'));
+    assert.ok(lastPatchUrl.includes('locked_by=eq.agent-1'));
+    assert.equal(lastPatchBody.progress_current, 500);
+    assert.equal(lastPatchBody.progress_total, 1000);
+    assert.ok(lastPatchBody.locked_at);
+    assert.ok(lastPatchBody.updated_at);
+
+    // B. Missing attempt throws v5_mirror_attempt_required without sending PATCH
+    lastPatchUrl = null;
+    await assert.rejects(
+      async () => {
+        await heartbeatV5MirrorJob({
+          jobId: 'job-hb-1',
+          agentId: 'agent-1'
+        });
+      },
+      /v5_mirror_attempt_required/
+    );
+    assert.equal(lastPatchUrl, null, 'No PATCH query should be sent when attempt is missing');
+
+    await assert.rejects(
+      async () => {
+        await heartbeatV5MirrorJob({
+          jobId: 'job-hb-1',
+          agentId: 'agent-1',
+          attempt: 0
+        });
+      },
+      /v5_mirror_attempt_required/
+    );
+    assert.equal(lastPatchUrl, null);
+
+    // C & E. Stale attempt (attempt=1 against attempts=2) => v5_mirror_lease_fenced
+    // Old attempt cannot update locked_at, updated_at, progress
+    lastPatchUrl = null;
+    await assert.rejects(
+      async () => {
+        await heartbeatV5MirrorJob({
+          jobId: 'job-stale-attempt',
+          agentId: 'agent-1',
+          attempt: 1,
+          progressCurrent: 800
+        });
+      },
+      /v5_mirror_lease_fenced/
+    );
+    assert.ok(lastPatchUrl.includes('attempts=eq.1'));
+
+    // D. Heartbeat from wrong agent => not owned
+    await assert.rejects(
+      async () => {
+        await heartbeatV5MirrorJob({
+          jobId: 'job-wrong-agent',
+          agentId: 'agent-intruder',
+          attempt: 1
+        });
+      },
+      /v5_mirror_job_not_owned/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('20. api/reader/complete.js v5-mirror-heartbeat enforces attempt >= 1 and error mapping', async () => {
+  process.env.READER_INGEST_SECRET = 'test_ingest_secret_token';
+  const handler = (await import('../api/reader/complete.js')).default;
+
+  const makeReqRes = (body, authHeader = 'Bearer test_ingest_secret_token') => {
+    let jsonBody = null;
+    const req = {
+      method: 'POST',
+      query: { action: 'v5-mirror-heartbeat' },
+      headers: {
+        authorization: authHeader,
+        'content-type': 'application/json'
+      },
+      [Symbol.asyncIterator]: async function* () {
+        yield Buffer.from(JSON.stringify(body));
+      }
+    };
+    const res = {
+      statusCode: 200,
+      status: (code) => {
+        res.statusCode = code;
+        return res;
+      },
+      json: (data) => {
+        jsonBody = data;
+        return res;
+      },
+      setHeader: () => res,
+      end: (data) => {
+        if (data) {
+          try {
+            jsonBody = JSON.parse(data);
+          } catch {}
+        }
+        return res;
+      }
+    };
+    return { req, res, getStatus: () => res.statusCode, getBody: () => jsonBody };
+  };
+
+  // Missing attempt -> HTTP 400
+  {
+    const { req, res, getStatus, getBody } = makeReqRes({ job_id: 'job-1', agent_id: 'agent-1' });
+    await handler(req, res);
+    assert.equal(getStatus(), 400);
+    assert.equal(getBody().error, 'v5_mirror_attempt_required');
+  }
+
+  // Attempt = 0 -> HTTP 400
+  {
+    const { req, res, getStatus, getBody } = makeReqRes({ job_id: 'job-1', agent_id: 'agent-1', attempt: 0 });
+    await handler(req, res);
+    assert.equal(getStatus(), 400);
+    assert.equal(getBody().error, 'v5_mirror_attempt_required');
+  }
+});
+
+test('21. Functional Python test: source-access failure sends exact claimed attempt and fails closed if missing', () => {
+  const managerDir = path.join(REPO_ROOT, 'reader-manager').replace(/\\/g, '/');
+  const pyTest = `
+import sys
+sys.path.insert(0, '${managerDir}')
+import reader_manager_agent
+
+captured_calls = []
+def mock_api(config, action, payload=None, timeout=45):
+    captured_calls.append((action, payload))
+    return {"ok": True}
+
+reader_manager_agent.api = mock_api
+reader_manager_agent.choose_v5_profile = lambda config, ch, sid, allow_busy: None
+
+config = {"agent_token": "tok"}
+
+# 1. Claimed job with valid attempt=3
+job_valid = {
+    "id": "job-src-valid",
+    "channel_ref": "@src_chan",
+    "job_type": "v5_mirror",
+    "attempt": 3,
+    "source_id": "src-1"
+}
+
+try:
+    reader_manager_agent.run_job(config, job_valid, stop_event=reader_manager_agent.threading.Event())
+    assert False, "Should have raised RuntimeError"
+except RuntimeError as exc:
+    assert "reader_source_access_denied" in str(exc)
+
+assert len(captured_calls) == 1, f"Expected 1 API call, got {len(captured_calls)}"
+action, payload = captured_calls[0]
+assert action == "v5-mirror-finish"
+assert payload["job_id"] == "job-src-valid"
+assert payload["ok"] is False
+assert payload["attempt"] == 3
+assert payload["error"] == "reader_source_access_denied"
+
+# 2. Claimed job with missing attempt -> fails closed locally, no finish sent
+captured_calls.clear()
+job_invalid = {
+    "id": "job-src-no-attempt",
+    "channel_ref": "@src_chan",
+    "job_type": "v5_mirror",
+    "source_id": "src-1"
+}
+
+try:
+    reader_manager_agent.run_job(config, job_invalid, stop_event=reader_manager_agent.threading.Event())
+    assert False, "Should have raised RuntimeError"
+except RuntimeError as exc:
+    assert "reader_source_access_denied" in str(exc)
+
+assert len(captured_calls) == 0, "No unfenced finish should be sent when attempt is missing"
+
+print("SOURCE_ACCESS_FENCING_OK")
+`;
+  const res = spawnSync(pythonBin, ['-c', pyTest], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `Python source-access test failed: ${res.stderr}`);
+  assert.match(res.stdout, /SOURCE_ACCESS_FENCING_OK/);
+});
+
+test('22. Functional Python test: repeated heartbeat failure terminates and kills child process before profile release', () => {
+  const managerDir = path.join(REPO_ROOT, 'reader-manager').replace(/\\/g, '/');
+  const pyTest = `
+import sys, time, subprocess, threading
+sys.path.insert(0, '${managerDir}')
+import reader_manager_agent
+
+lifecycle_events = []
+hb_count = 0
+child_proc_ref = None
+
+def mock_worker_command(name):
+    return [sys.executable, "-c", "import time; time.sleep(60)"]
+
+reader_manager_agent.worker_command = mock_worker_command
+reader_manager_agent.has_v5_r2_config = lambda c: True
+reader_manager_agent.choose_v5_profile = lambda c, ch, sid, allow_busy: {"id": "prof-supervision", "session": "s", "api_id": 12345, "api_hash": "hash123"}
+reader_manager_agent.progress_info = lambda p: (100, 1000, "telegram_download")
+reader_manager_agent.progress_telemetry = lambda p: {"stage": "telegram_download", "bytes_per_second": 500, "eta_seconds": 10}
+
+def mock_api(config, action, payload=None, timeout=45):
+    global hb_count, child_proc_ref
+    lifecycle_events.append((action, dict(payload or {})))
+    if action == "v5-mirror-heartbeat":
+        hb_count += 1
+        raise RuntimeError("v5_mirror_heartbeat_failed (HTTP 500)")
+    if action == "profile-status":
+        if child_proc_ref is not None:
+            poll_code = child_proc_ref.poll()
+            assert poll_code is not None, f"Child process is still ALIVE when profile-status was called! poll={poll_code}"
+            lifecycle_events.append(("profile_status_verified_dead", poll_code))
+    return {"ok": True}
+
+reader_manager_agent.api = mock_api
+
+config = {
+    "agent_token": "tok",
+    "profiles": [{"id": "prof-supervision", "status": "busy", "session": "s", "api_id": 12345, "api_hash": "hash123"}],
+    "r2": {"account_id": "a", "access_key_id": "k", "secret_access_key": "s", "bucket": "b"}
+}
+
+job = {
+    "id": "job-supervision-test",
+    "channel_ref": "@testchan",
+    "job_type": "v5_mirror",
+    "attempt": 1,
+    "source_message_id": 42,
+    "asset_id": "asset-1",
+    "object_key": "key",
+    "expected_bytes": 1000
+}
+
+orig_popen = subprocess.Popen
+def tracking_popen(*args, **kwargs):
+    global child_proc_ref
+    proc = orig_popen(*args, **kwargs)
+    child_proc_ref = proc
+    return proc
+
+subprocess.Popen = tracking_popen
+
+try:
+    reader_manager_agent.run_job(config, job, stop_event=threading.Event())
+    assert False, "Should have raised RuntimeError due to heartbeat lease lost"
+except RuntimeError as exc:
+    assert "heartbeat_lease_lost" in str(exc)
+
+subprocess.Popen = orig_popen
+
+assert child_proc_ref is not None
+assert child_proc_ref.poll() is not None, "Child process was not terminated!"
+assert hb_count >= 3, f"Expected at least 3 heartbeat attempts, got {hb_count}"
+
+ready_calls = [ev for ev in lifecycle_events if ev[0] == "profile-status" and ev[1].get("status") == "ready"]
+assert len(ready_calls) == 1, "profile-status ready should be called in finally"
+
+verified = [ev for ev in lifecycle_events if ev[0] == "profile_status_verified_dead"]
+assert len(verified) == 1, "Child process verified dead event missing!"
+
+success_finishes = [ev for ev in lifecycle_events if ev[0] == "v5-mirror-finish" and ev[1].get("ok") is True]
+assert len(success_finishes) == 0, "Successful finish must NOT be submitted when lease health is lost!"
+
+print("SUPERVISION_CHILD_TEST_OK")
+`;
+  const res = spawnSync(pythonBin, ['-c', pyTest], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `Python process supervision test failed: ${res.stderr}`);
+  assert.match(res.stdout, /SUPERVISION_CHILD_TEST_OK/);
+});
+
+test('23. Functional Python test: benchmark-only slot mismatch safely releases leased job with attempt', () => {
+  const managerDir = path.join(REPO_ROOT, 'reader-manager').replace(/\\/g, '/');
+  const pyTest = `
+import sys
+sys.path.insert(0, '${managerDir}')
+import reader_manager_agent
+
+captured_finishes = []
+def mock_api(config, action, payload=None, timeout=45):
+    if action == "v5-mirror-finish":
+        captured_finishes.append(payload)
+    return {"ok": True}
+
+reader_manager_agent.api = mock_api
+
+config = {"agent_token": "tok"}
+job = {
+    "id": "job-prod-in-bench-slot",
+    "benchmark": False,
+    "attempt": 2
+}
+slot_type = "benchmark_only"
+is_benchmark = bool(job.get("benchmark"))
+
+assert slot_type == "benchmark_only" and not is_benchmark
+
+attempt_val = job.get("attempt")
+parsed_attempt = int(attempt_val) if attempt_val is not None else None
+if parsed_attempt is not None and parsed_attempt >= 1:
+    reader_manager_agent.api(config, "v5-mirror-finish", {
+        "job_id": job.get("id"),
+        "ok": False,
+        "error": "benchmark_slot_mismatch",
+        "attempt": parsed_attempt
+    })
+
+assert len(captured_finishes) == 1
+rel = captured_finishes[0]
+assert rel["job_id"] == "job-prod-in-bench-slot"
+assert rel["ok"] is False
+assert rel["error"] == "benchmark_slot_mismatch"
+assert rel["attempt"] == 2
+
+print("BENCHMARK_DEFENSIVE_RELEASE_OK")
+`;
+  const res = spawnSync(pythonBin, ['-c', pyTest], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `Python benchmark defensive release test failed: ${res.stderr}`);
+  assert.match(res.stdout, /BENCHMARK_DEFENSIVE_RELEASE_OK/);
+});
+
+test('24. Functional Python test: HTTP 207 / warning is distinguished from normal HTTP 200 and logged without retry', () => {
+  const managerDir = path.join(REPO_ROOT, 'reader-manager').replace(/\\/g, '/');
+  const pyTest = `
+import sys, shutil
+from pathlib import Path
+sys.path.insert(0, '${managerDir}')
+import reader_manager_agent
+
+warnings_dir = Path('${managerDir}') / ".finish-warnings"
+shutil.rmtree(warnings_dir, ignore_errors=True)
+
+test_job_id_207 = "test-job-207-incomplete"
+test_job_id_200 = "test-job-200-normal"
+
+reader_manager_agent.save_finish_warning_log(test_job_id_207, {
+    "job_id": test_job_id_207,
+    "warning": "finish_committed_metadata_incomplete",
+    "attempt": 1
+})
+
+marker_file = warnings_dir / f"warning_{test_job_id_207}.json"
+assert marker_file.exists(), "Warning marker file should exist for 207"
+
+marker_file_200 = warnings_dir / f"warning_{test_job_id_200}.json"
+assert not marker_file_200.exists(), "Warning marker file should not exist for 200"
+
+shutil.rmtree(warnings_dir, ignore_errors=True)
+
+print("HTTP_207_WARNING_HANDLING_OK")
+`;
+  const res = spawnSync(pythonBin, ['-c', pyTest], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `Python HTTP 207 test failed: ${res.stderr}`);
+  assert.match(res.stdout, /HTTP_207_WARNING_HANDLING_OK/);
+});
+

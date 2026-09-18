@@ -25,7 +25,7 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -178,6 +178,24 @@ def classify_telegram_error(error):
     return "reader_source_access_denied"
 
 
+def terminate_and_kill_process(p, term_timeout=5, kill_timeout=2):
+    """Terminate child process cleanly; if still alive after timeout, kill it forcefully and ensure stopped."""
+    if p is None or p.poll() is not None:
+        return
+    try:
+        p.terminate()
+    except Exception:
+        pass
+    try:
+        p.wait(timeout=term_timeout)
+    except Exception:
+        try:
+            p.kill()
+            p.wait(timeout=kill_timeout)
+        except Exception:
+            pass
+
+
 def save_finish_failure_log(job_id, failure_record):
     """Persist structured finish API failure details to local diagnostic log."""
     try:
@@ -186,6 +204,18 @@ def save_finish_failure_log(job_id, failure_record):
         clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
         log_path = log_dir / f"failure_{clean_id}.json"
         log_path.write_text(json.dumps(failure_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def save_finish_warning_log(job_id, warning_record):
+    """Persist structured finish warning details to local diagnostic log."""
+    try:
+        log_dir = Path(__file__).resolve().parent / ".finish-warnings"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        clean_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "unknown"))
+        log_path = log_dir / f"warning_{clean_id}.json"
+        log_path.write_text(json.dumps(warning_record, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
@@ -262,8 +292,17 @@ def flush_pending_finishes(config):
         completion["attempt"] = int(attempt)
         try:
             print(f"Retrying pending finish from outbox for job {job_id}...", flush=True)
-            api(config, "v5-mirror-finish", completion, timeout=20)
+            finish_res = api(config, "v5-mirror-finish", completion, timeout=20)
             path_obj.unlink(missing_ok=True)
+            if isinstance(finish_res, dict) and finish_res.get("warning") == "finish_committed_metadata_incomplete":
+                print(f"[WARN] finish_committed_metadata_incomplete on replayed finish for job {job_id}. Finish RPC committed; DB metadata enrichment incomplete. Do NOT retry finish RPC.", flush=True)
+                save_finish_warning_log(job_id, {
+                    "job_id": job_id,
+                    "attempt": int(attempt),
+                    "warning": "finish_committed_metadata_incomplete",
+                    "response": finish_res,
+                    "timestamp": time.time()
+                })
             replayed += 1
             print(f"Successfully replayed pending finish for job {job_id}.", flush=True)
         except Exception as exc:
@@ -361,7 +400,22 @@ def run_job(config, job, stop_event, status_callback=None):
         profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
         if not profile:
             access_err = _LAST_SOURCE_ACCESS_ERROR or "reader_source_access_denied"
-            api(config, "v5-mirror-finish", {"job_id": job_id, "ok": False, "error": access_err})
+            attempt_val = job.get("attempt")
+            try:
+                parsed_attempt = int(attempt_val) if attempt_val is not None else None
+            except (TypeError, ValueError):
+                parsed_attempt = None
+
+            if parsed_attempt is None or parsed_attempt < 1:
+                print(f"[WARN] Cannot report source access failure for job {job_id}: missing or invalid attempt ({attempt_val})", flush=True)
+                raise RuntimeError(access_err)
+
+            api(config, "v5-mirror-finish", {
+                "job_id": job_id,
+                "ok": False,
+                "error": access_err,
+                "attempt": parsed_attempt
+            })
             raise RuntimeError(access_err)
         profile_id = str(profile["id"])
     else:
@@ -455,9 +509,12 @@ def run_job(config, job, stop_event, status_callback=None):
             with _ACTIVE_MIRRORS_LOCK:
                 _ACTIVE_SUBPROCESSES[job_id] = process
             last_heartbeat = 0
+            consecutive_heartbeat_failures = 0
+            max_heartbeat_failures = 3
+            lease_lost = False
             while process.poll() is None:
                 if stop_event.is_set():
-                    process.terminate()
+                    terminate_and_kill_process(process)
                     break
                 now_ts = time.time()
                 heartbeat_interval = 2.5 if job_type == "v5_mirror" else 10
@@ -465,7 +522,11 @@ def run_job(config, job, stop_event, status_callback=None):
                     if job_type == "v5_mirror":
                         current, total, stage = progress_info(progress_file)
                         telem = progress_telemetry(progress_file)
-                        payload = {"job_id": job_id}
+                        attempt_val = job.get("attempt")
+                        payload = {
+                            "job_id": job_id,
+                            "attempt": int(attempt_val or 1)
+                        }
                         if current is not None:
                             payload["progress_current"] = current
                         if total is not None:
@@ -476,13 +537,25 @@ def run_job(config, job, stop_event, status_callback=None):
                             payload["bytes_per_second"] = telem["bytes_per_second"]
                         if telem.get("eta_seconds") is not None:
                             payload["eta_seconds"] = telem["eta_seconds"]
-                        api(config, "v5-mirror-heartbeat", payload, timeout=20)
-                        if status_callback:
-                            stage_desc = "Đang tải Telegram" if stage == "telegram_download" else ("Đang upload R2" if stage == "r2_upload" else ("Đang xử lý Faststart" if stage == "faststart_remux" else "Đang sao lưu media V5"))
-                            detail_str = f" ({current // 1048576} MB / {total // 1048576} MB)" if (current and total) else ""
-                            rate_str = f" @ {telem['mb_per_second']} MB/s" if telem.get("mb_per_second") else ""
-                            eta_str = f" · còn {int(telem['eta_seconds'])}s" if telem.get("eta_seconds") else ""
-                            status_callback(f"{stage_desc}{detail_str}{rate_str}{eta_str} từ {channel}")
+                        try:
+                            api(config, "v5-mirror-heartbeat", payload, timeout=20)
+                            consecutive_heartbeat_failures = 0
+                            if status_callback:
+                                stage_desc = "Đang tải Telegram" if stage == "telegram_download" else ("Đang upload R2" if stage == "r2_upload" else ("Đang xử lý Faststart" if stage == "faststart_remux" else "Đang sao lưu media V5"))
+                                detail_str = f" ({current // 1048576} MB / {total // 1048576} MB)" if (current and total) else ""
+                                rate_str = f" @ {telem['mb_per_second']} MB/s" if telem.get("mb_per_second") else ""
+                                eta_str = f" · còn {int(telem['eta_seconds'])}s" if telem.get("eta_seconds") else ""
+                                status_callback(f"{stage_desc}{detail_str}{rate_str}{eta_str} từ {channel}")
+                        except Exception as hb_exc:
+                            consecutive_heartbeat_failures += 1
+                            err_msg = str(hb_exc)
+                            is_fenced = "v5_mirror_lease_fenced" in err_msg or "v5_mirror_job_not_owned" in err_msg
+                            print(f"[WARN] V5 mirror heartbeat failure {consecutive_heartbeat_failures}/{max_heartbeat_failures} for job {job_id}: {hb_exc}", flush=True)
+                            if is_fenced or consecutive_heartbeat_failures >= max_heartbeat_failures:
+                                lease_lost = True
+                                print(f"[CRITICAL] Lease lost or heartbeat failure budget exhausted for job {job_id}. Supervising child worker termination.", flush=True)
+                                terminate_and_kill_process(process)
+                                break
                     else:
                         current, total = progress_value(progress_file)
                         payload = {"job_id": job_id}
@@ -507,6 +580,25 @@ def run_job(config, job, stop_event, status_callback=None):
             current, total = progress_value(progress_file)
 
         if job_type == "v5_mirror":
+            if lease_lost:
+                print(f"[ERROR] Job {job_id} aborted due to heartbeat lease failure. Not submitting success.", flush=True)
+                attempt_val = job.get("attempt")
+                try:
+                    parsed_attempt = int(attempt_val) if attempt_val is not None else None
+                except (TypeError, ValueError):
+                    parsed_attempt = None
+                if parsed_attempt is not None and parsed_attempt >= 1:
+                    try:
+                        api(config, "v5-mirror-finish", {
+                            "job_id": job_id,
+                            "ok": False,
+                            "error": "heartbeat_lease_lost",
+                            "attempt": parsed_attempt
+                        })
+                    except Exception:
+                        pass
+                raise RuntimeError("heartbeat_lease_lost")
+
             ok = code == 0 and result.get("ok") is True
             error = None if ok else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000]
             if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
@@ -540,8 +632,17 @@ def run_job(config, job, stop_event, status_callback=None):
 
             finish_start = time.time()
             try:
-                api(config, "v5-mirror-finish", completion)
+                finish_res = api(config, "v5-mirror-finish", completion)
                 remove_pending_finish(job_id)
+                if isinstance(finish_res, dict) and finish_res.get("warning") == "finish_committed_metadata_incomplete":
+                    print(f"[WARN] finish_committed_metadata_incomplete for job {job_id}. Finish RPC committed; DB metadata enrichment incomplete. Do NOT retry finish RPC.", flush=True)
+                    save_finish_warning_log(job_id, {
+                        "job_id": job_id,
+                        "attempt": completion.get("attempt"),
+                        "warning": "finish_committed_metadata_incomplete",
+                        "response": finish_res,
+                        "timestamp": time.time()
+                    })
             except Exception as finish_exc:
                 if ok:
                     save_pending_finish(job_id, completion)
@@ -581,6 +682,8 @@ def run_job(config, job, stop_event, status_callback=None):
         if not ok:
             raise RuntimeError(error if job_type == "v5_mirror" else f"{job_type}_exit_{code}")
     finally:
+        if 'process' in locals() and process and process.poll() is None:
+            terminate_and_kill_process(process)
         with _ACTIVE_MIRRORS_LOCK:
             _ACTIVE_SUBPROCESSES.pop(job_id, None)
             _ACTIVE_MIRRORS.pop(job_id, None)
@@ -840,8 +943,24 @@ def agent_loop(stop_event, status_callback=None):
                     is_benchmark = bool(job.get("benchmark"))
                     if slot_type == "benchmark_only" and not is_benchmark:
                         # Defensive: production job claimed while a benchmark job is running.
-                        # Release it and do not run concurrently.
-                        pass
+                        # Safely release it back to the queue with authenticated finish(ok=False) and exact attempt.
+                        attempt_val = job.get("attempt")
+                        try:
+                            parsed_attempt = int(attempt_val) if attempt_val is not None else None
+                        except (TypeError, ValueError):
+                            parsed_attempt = None
+                        if parsed_attempt is not None and parsed_attempt >= 1:
+                            try:
+                                api(config, "v5-mirror-finish", {
+                                    "job_id": job.get("id"),
+                                    "ok": False,
+                                    "error": "benchmark_slot_mismatch",
+                                    "attempt": parsed_attempt
+                                })
+                            except Exception as release_exc:
+                                print(f"[WARN] Failed to release mismatched job {job.get('id')}: {release_exc}", flush=True)
+                        else:
+                            print(f"[ERROR] Cannot release mismatched job {job.get('id')}: missing attempt generation", flush=True)
                     else:
                         start_mirror_job(config, job, stop_event, status_callback)
                         total_active, has_prod, benchmark_count = active_mirror_stats()
