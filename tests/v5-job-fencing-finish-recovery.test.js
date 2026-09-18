@@ -71,9 +71,11 @@ test('4. api/reader/complete.js requires attempt and maps lease_fenced to 409', 
   assert.match(apiCode, /v5_mirror_lease_fenced/);
 });
 
-test('5. reader_manager_agent.py includes attempt in mirror finish completion payload', () => {
-  assert.match(agentCode, /attempt_val = job\.get\("attempt"\)/);
-  assert.match(agentCode, /"attempt": int\(attempt_val or 0\)/);
+test('5. reader_manager_agent.py includes fail-closed attempt in mirror finish completion payload', () => {
+  assert.match(agentCode, /def required_job_attempt\(job\):/);
+  assert.match(agentCode, /parsed_job_attempt = required_job_attempt\(job\) if job_type == "v5_mirror" else None/);
+  assert.match(agentCode, /"attempt": parsed_job_attempt/);
+  assert.doesNotMatch(agentCode, /int\(attempt_val or 1\)/);
 });
 
 test('6. Finish outbox mechanism saves unconfirmed completions with attempt and unlinks on success', () => {
@@ -912,7 +914,7 @@ try:
     reader_manager_agent.run_job(config, job_invalid, stop_event=reader_manager_agent.threading.Event())
     assert False, "Should have raised RuntimeError"
 except RuntimeError as exc:
-    assert "reader_source_access_denied" in str(exc)
+    assert str(exc) == "v5_mirror_attempt_required"
 
 assert len(captured_calls) == 0, "No unfenced finish should be sent when attempt is missing"
 
