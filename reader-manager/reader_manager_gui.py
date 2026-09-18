@@ -17,7 +17,7 @@ from reader_manager_storage import load_config, save_config
 class ReaderManagerApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Yêu Nấu Ăn Reader")
+        self.title(f"Yêu Nấu Ăn Reader {APP_VERSION}")
         self.geometry("760x570")
         self.minsize(680, 480)
         self.stop_event = None

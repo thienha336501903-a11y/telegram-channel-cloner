@@ -1,5 +1,5 @@
 #define MyAppName "Yêu Nấu Ăn Reader"
-#define MyAppVersion "1.4.5"
+#define MyAppVersion "1.4.6"
 #define MyAppExeName "YeuNauAnReader.exe"
 
 [Setup]
@@ -27,5 +27,3 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "YeuNauAnReader"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue
 
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Mở Yêu Nấu Ăn Reader"; Flags: nowait postinstall skipifsilent
