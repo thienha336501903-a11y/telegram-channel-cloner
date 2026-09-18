@@ -109,7 +109,8 @@ test('12. Existing Reader config from 1.3.4 loads seamlessly in 1.4.0', () => {
 
 test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
   assert.match(jobs, /async function selectMany\(path\) \{/);
-  assert.match(jobs, /const runningJobs = await selectMany\(/);
+  assert.match(jobs, /const runningRows = await selectMany\(/);
+  assert.match(jobs, /const runningJobs = runningRows\.filter\(/);
 });
 
 test('14. Benchmark/canary workers can share active local profile only through server-returned benchmark scheduling bit', () => {
@@ -118,4 +119,19 @@ test('14. Benchmark/canary workers can share active local profile only through s
   assert.match(agent, /profile = choose_v5_profile\(config, channel, source_id, allow_busy=is_benchmark\)/);
   assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
   assert.match(jobs, /production_canary: productionCanary/);
+});
+
+
+test('15. stale mirror leases do not block claim RPC recovery, while invalid timestamps fail closed', async () => {
+  const { isFreshMirrorLease } = await import('../lib/v5-mirror-jobs.js');
+  const now = Date.parse('2026-09-18T06:46:42.000Z');
+
+  assert.equal(isFreshMirrorLease('2026-09-18T06:29:07.718Z', now), false);
+  assert.equal(isFreshMirrorLease('2026-09-18T06:31:43.000Z', now), true);
+  assert.equal(isFreshMirrorLease('not-a-date', now), true);
+  assert.equal(isFreshMirrorLease(null, now), true);
+
+  assert.match(jobs, /select=id,course_id,asset_id,payload,locked_at/);
+  assert.match(jobs, /runningRows\.filter\(job => isFreshMirrorLease\(job\.locked_at\)\)/);
+  assert.match(jobs, /rpc\/claim_v5_telegram_mirror_job/);
 });
