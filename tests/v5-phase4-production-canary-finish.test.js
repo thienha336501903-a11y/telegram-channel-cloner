@@ -16,7 +16,7 @@ test('Phase 4 finish wrapper is restricted to the exact approved course/source/m
 });
 
 test('all non-canary and failed jobs delegate to the unchanged production finish path', () => {
-  assert.match(finish, /import \{ finishV5MirrorJob(?:, safeProgress)? \} from '\.\/v5-mirror-jobs\.js'/);
+  assert.match(finish, /import \{ finishV5MirrorJob(?:, oneRpcRow)?(?:, safeProgress)? \} from '\.\/v5-mirror-jobs\.js'/);
   assert.match(finish, /if \(!context \|\| ok !== true\) \{\s*return finishV5MirrorJob/);
   assert.match(finish, /payload\.benchmark === true/);
 });

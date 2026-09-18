@@ -145,6 +145,9 @@ export default async function handler(req, res) {
         telemetry: body.telemetry && typeof body.telemetry === 'object' && !Array.isArray(body.telemetry) ? body.telemetry : null
       });
       if (!job) return json(res, 409, { ok: false, error: 'v5_mirror_job_not_owned' });
+      if (job.metadata_enrichment_incomplete || job.enrichment_error === 'finish_committed_metadata_incomplete') {
+        return json(res, 207, { ok: true, warning: 'finish_committed_metadata_incomplete', job });
+      }
       return json(res, 200, { ok: true, job });
     } catch (error) {
       const errMsg = String(error?.message || '');

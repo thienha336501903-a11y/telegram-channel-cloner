@@ -367,3 +367,290 @@ print("WORKER_CP1252_LOGGING_OK")
   assert.match(res.stdout, /WORKER_CP1252_LOGGING_OK/);
 });
 
+test('15. Unit tests: oneRpcRow handles both PostgREST collection and single-object RPC responses', async () => {
+  const { oneRpcRow } = await import('../lib/v5-mirror-jobs.js');
+
+  // A. oneRpcRow([{ id: 1 }]) => { id: 1 }
+  assert.deepEqual(oneRpcRow([{ id: 1 }]), { id: 1 });
+
+  // B. oneRpcRow({ id: 1 }) => { id: 1 }
+  assert.deepEqual(oneRpcRow({ id: 1 }), { id: 1 });
+
+  // C. oneRpcRow([]) => null
+  assert.equal(oneRpcRow([]), null);
+
+  // D. oneRpcRow(null) => null
+  assert.equal(oneRpcRow(null), null);
+
+  // Extra boundary cases
+  assert.equal(oneRpcRow(undefined), null);
+  assert.equal(oneRpcRow(''), null);
+  assert.equal(oneRpcRow(123), null);
+  assert.equal(oneRpcRow([null]), null);
+  assert.equal(oneRpcRow([undefined]), null);
+});
+
+test('16. Executable runtime test: finishV5MirrorJob handles PostgREST single-object RPC response and runs enrichment PATCH', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { finishV5MirrorJob } = await import('../lib/v5-mirror-jobs.js');
+
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  let rpcCalled = false;
+  let jobPatchPayload = null;
+  let assetPatchPayload = null;
+
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    const body = opts?.body ? JSON.parse(opts.body) : null;
+
+    if (urlStr.includes('v5_jobs?select=')) {
+      return makeResp([{
+        id: 'job-single-obj',
+        course_id: 'course-single-obj',
+        asset_id: 'asset-single-obj',
+        status: 'running',
+        locked_by: 'agent-single',
+        attempts: 1,
+        payload: {},
+        result: {}
+      }]);
+    }
+    if (urlStr.includes('v5_media_assets?select=')) {
+      return makeResp([{
+        id: 'asset-single-obj',
+        origin: 'telegram',
+        bytes: 79579331,
+        mime_type: 'video/mp4',
+        original_filename: 'Mo-rong-66-.mp4'
+      }]);
+    }
+    if (urlStr.includes('rpc/finish_v5_telegram_mirror_job')) {
+      rpcCalled = true;
+      // PostgREST returns a single composite object when RPC returns a single table row
+      return makeResp({
+        id: 'job-single-obj',
+        status: 'success',
+        result: {
+          object_key: 'media/v5/course-single-obj/asset-single-obj/Mo-rong-66-.mp4',
+          bytes: 79579382,
+          etag: 'etag-test-123'
+        }
+      });
+    }
+    if (urlStr.includes('v5_jobs?id=eq.')) {
+      jobPatchPayload = body;
+      return makeResp([{
+        id: 'job-single-obj',
+        status: 'success',
+        result: body.result
+      }]);
+    }
+    if (urlStr.includes('v5_media_assets?id=eq.')) {
+      assetPatchPayload = body;
+      return makeResp([{
+        id: 'asset-single-obj',
+        status: 'ready'
+      }]);
+    }
+    return makeResp([]);
+  };
+
+  try {
+    const res = await finishV5MirrorJob({
+      jobId: 'job-single-obj',
+      agentId: 'agent-single',
+      ok: true,
+      attempt: 1,
+      objectKey: 'media/v5/course-single-obj/asset-single-obj/Mo-rong-66-.mp4',
+      bytes: 79579382,
+      sourceBytes: 79579331,
+      finalBytes: 79579382,
+      transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: '47bdd87319e7d555c920cd1362c09c7e6e3d53e3eda6a588d0885a0e3964b5fa',
+      etag: 'etag-test-123'
+    });
+
+    assert.ok(res, 'finishV5MirrorJob must not return null');
+    assert.equal(rpcCalled, true, 'RPC must have been invoked');
+    assert.ok(jobPatchPayload, 'Job enrichment PATCH must have executed');
+    assert.ok(assetPatchPayload, 'Asset enrichment PATCH must have executed');
+
+    assert.equal(res.status, 'success');
+    assert.equal(res.result.source_bytes, 79579331);
+    assert.equal(res.result.final_bytes, 79579382);
+    assert.equal(res.result.transform_version, 'ffmpeg-faststart-v1');
+    assert.equal(res.result.checksum_sha256, '47bdd87319e7d555c920cd1362c09c7e6e3d53e3eda6a588d0885a0e3964b5fa');
+    assert.equal(res.result.faststart_drift_bytes, 51);
+    assert.equal(assetPatchPayload.checksum_sha256, '47bdd87319e7d555c920cd1362c09c7e6e3d53e3eda6a588d0885a0e3964b5fa');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('17. Executable runtime test: finishV5MirrorJob still handles legacy array-shaped RPC response', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { finishV5MirrorJob } = await import('../lib/v5-mirror-jobs.js');
+
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    const body = opts?.body ? JSON.parse(opts.body) : null;
+
+    if (urlStr.includes('v5_jobs?select=')) {
+      return makeResp([{
+        id: 'job-array-obj',
+        course_id: 'course-array-obj',
+        asset_id: 'asset-array-obj',
+        status: 'running',
+        locked_by: 'agent-array',
+        attempts: 1,
+        payload: {},
+        result: {}
+      }]);
+    }
+    if (urlStr.includes('v5_media_assets?select=')) {
+      return makeResp([{
+        id: 'asset-array-obj',
+        origin: 'telegram',
+        bytes: 1000,
+        mime_type: 'video/mp4',
+        original_filename: 'video.mp4'
+      }]);
+    }
+    if (urlStr.includes('rpc/finish_v5_telegram_mirror_job')) {
+      // Array-shaped response
+      return makeResp([{
+        id: 'job-array-obj',
+        status: 'success',
+        result: {
+          object_key: 'media/v5/course-array-obj/asset-array-obj/video.mp4',
+          bytes: 1000
+        }
+      }]);
+    }
+    if (urlStr.includes('v5_jobs?id=eq.')) {
+      return makeResp([{ id: 'job-array-obj', status: 'success', result: body.result }]);
+    }
+    if (urlStr.includes('v5_media_assets?id=eq.')) {
+      return makeResp([{ id: 'asset-array-obj', status: 'ready' }]);
+    }
+    return makeResp([]);
+  };
+
+  try {
+    const res = await finishV5MirrorJob({
+      jobId: 'job-array-obj',
+      agentId: 'agent-array',
+      ok: true,
+      attempt: 1,
+      objectKey: 'media/v5/course-array-obj/asset-array-obj/video.mp4',
+      bytes: 1000,
+      sourceBytes: 1000,
+      finalBytes: 1000,
+      transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: 'a'.repeat(64)
+    });
+
+    assert.ok(res);
+    assert.equal(res.status, 'success');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('18. Executable runtime test: finishV5MirrorJob gracefully surfaces failed enrichment PATCH without pretending ownership failed', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://mock.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'sb_secret_mock_key';
+
+  const { finishV5MirrorJob } = await import('../lib/v5-mirror-jobs.js');
+
+  const originalFetch = globalThis.fetch;
+  const makeResp = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(data),
+    json: async () => data
+  });
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+
+    if (urlStr.includes('v5_jobs?select=')) {
+      return makeResp([{
+        id: 'job-enrich-fail',
+        course_id: 'course-enrich-fail',
+        asset_id: 'asset-enrich-fail',
+        status: 'running',
+        locked_by: 'agent-enrich',
+        attempts: 1,
+        payload: {},
+        result: {}
+      }]);
+    }
+    if (urlStr.includes('v5_media_assets?select=')) {
+      return makeResp([{
+        id: 'asset-enrich-fail',
+        origin: 'telegram',
+        bytes: 1000,
+        mime_type: 'video/mp4',
+        original_filename: 'video.mp4'
+      }]);
+    }
+    if (urlStr.includes('rpc/finish_v5_telegram_mirror_job')) {
+      return makeResp({
+        id: 'job-enrich-fail',
+        status: 'success',
+        result: {
+          object_key: 'media/v5/course-enrich-fail/asset-enrich-fail/video.mp4',
+          bytes: 1000
+        }
+      });
+    }
+    // Simulate enrichment PATCH network/500 failure
+    if (urlStr.includes('v5_jobs?id=eq.') || urlStr.includes('v5_media_assets?id=eq.')) {
+      return makeResp({ error: 'DB connection timeout during enrichment' }, 500);
+    }
+    return makeResp([]);
+  };
+
+  try {
+    const res = await finishV5MirrorJob({
+      jobId: 'job-enrich-fail',
+      agentId: 'agent-enrich',
+      ok: true,
+      attempt: 1,
+      objectKey: 'media/v5/course-enrich-fail/asset-enrich-fail/video.mp4',
+      bytes: 1000,
+      sourceBytes: 1000,
+      finalBytes: 1000,
+      transformVersion: 'ffmpeg-faststart-v1',
+      checksumSha256: 'b'.repeat(64)
+    });
+
+    assert.ok(res, 'Job must be returned since finish RPC committed');
+    assert.equal(res.status, 'success');
+    assert.equal(res.metadata_enrichment_incomplete, true);
+    assert.equal(res.enrichment_error, 'finish_committed_metadata_incomplete');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
