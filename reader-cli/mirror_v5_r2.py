@@ -510,7 +510,7 @@ def can_reuse_download_cache(local_path, manifest, channel, message_id, expected
         return False
     if int(manifest.get("download_size") or 0) != size:
         return False
-    if expected_bytes and not is_photo and size != int(expected_bytes):
+    if expected_bytes and size != int(expected_bytes):
         return False
     return True
 
@@ -623,6 +623,26 @@ def head_matching_object(client, bucket, key, expected_bytes):
     return {"bytes": remote_bytes, "etag": clean(head.get("ETag"))}
 
 
+def telegram_size(item):
+    direct = int(getattr(item, "size", 0) or 0)
+    if direct > 0:
+        return direct
+    progressive = [int(value or 0) for value in (getattr(item, "sizes", None) or [])]
+    if progressive:
+        return max(progressive)
+    return len(getattr(item, "bytes", b"") or b"")
+
+
+def exact_photo_size(message, expected_bytes):
+    photo = getattr(message, "photo", None) or getattr(getattr(message, "media", None), "photo", None)
+    if photo is None:
+        return None
+    matches = [item for item in getattr(photo, "sizes", None) or [] if telegram_size(item) == int(expected_bytes)]
+    if not matches:
+        raise RuntimeError("telegram_photo_indexed_size_unavailable")
+    return matches[0]
+
+
 async def download_resumable(client, entity, message_id, target, expected_bytes=0, is_photo=False, progress_file=None):
     if hasattr(message_id, "media"):
         message = message_id
@@ -630,6 +650,20 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
         message = await client.get_messages(entity, ids=int(message_id))
     if not message or not getattr(message, "media", None):
         raise RuntimeError("telegram_media_message_missing")
+
+    photo_size = exact_photo_size(message, expected_bytes) if is_photo and expected_bytes else None
+    if photo_size is not None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        downloaded = await client.download_media(message, file=str(target), thumb=photo_size)
+        if not downloaded or not target.exists():
+            raise RuntimeError("telegram_photo_download_missing")
+        actual = target.stat().st_size
+        if actual != int(expected_bytes):
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"telegram_photo_size_mismatch:{actual}/{expected_bytes}")
+        report_progress(progress_file, "telegram_download", actual, actual)
+        return message, actual
 
     total = message_size(message) or int(expected_bytes or 0)
     existing = target.stat().st_size if target.exists() else 0
@@ -659,22 +693,11 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
     actual = target.stat().st_size
     if actual <= 0:
         raise RuntimeError("telegram_download_empty")
-    if total > 0 and actual != total:
-        if not is_photo:
-            raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{total}")
-        # Photo representation mismatch: perform fresh-download validation
-        print(f"Telegram photo size mismatch ({actual}/{total}), performing fresh download validation...", flush=True)
-        target.unlink(missing_ok=True)
-        downloaded = await client.download_media(message.media, file=str(target))
-        if not downloaded or not target.exists():
-            raise RuntimeError("telegram_photo_fresh_download_missing")
-        actual = target.stat().st_size
-        if actual <= 0:
-            raise RuntimeError("telegram_photo_fresh_download_empty")
-        print(f"Telegram photo fresh download validated: {actual} bytes (was expected {total})", flush=True)
-        report_progress(progress_file, "telegram_download", actual, actual)
-    else:
-        report_progress(progress_file, "telegram_download", actual, total or actual)
+    if expected_bytes and actual != int(expected_bytes):
+        raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{expected_bytes}")
+    if total > 0 and actual != total and not is_photo:
+        raise RuntimeError(f"telegram_download_size_mismatch:{actual}/{total}")
+    report_progress(progress_file, "telegram_download", actual, total or actual)
     return message, actual
 
 
@@ -692,14 +715,20 @@ async def download_thumbnail(client, entity, message_id, target, expected_bytes=
         return message, existing
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
-    downloaded = await client.download_media(message, file=str(target), thumb=-1)
+    document = getattr(message, "document", None) or getattr(getattr(message, "media", None), "document", None)
+    thumbs = getattr(document, "thumbs", None) or []
+    matches = [thumb for thumb in thumbs if telegram_size(thumb) == expected] if expected else []
+    if expected and not matches:
+        raise RuntimeError("telegram_thumbnail_indexed_size_unavailable")
+    downloaded = await client.download_media(message, file=str(target), thumb=matches[0] if matches else -1)
     if not downloaded or not target.exists():
         raise RuntimeError("telegram_thumbnail_missing")
     actual = target.stat().st_size
     if actual <= 0:
         raise RuntimeError("telegram_thumbnail_empty")
     if expected > 0 and actual != expected:
-        print(f"Telegram thumbnail size mismatch ({actual}/{expected}), fresh download accepted", flush=True)
+        target.unlink(missing_ok=True)
+        raise RuntimeError(f"telegram_thumbnail_size_mismatch:{actual}/{expected}")
     report_progress(progress_file, "telegram_download", actual, actual)
     return message, actual
 

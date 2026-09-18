@@ -25,10 +25,12 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
+SMALL_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+SMALL_IMAGE_STALL_SECONDS = 60
 
 _ACTIVE_MIRRORS = {}
 _ACTIVE_MIRRORS_LOCK = threading.Lock()
@@ -206,7 +208,7 @@ def classify_telegram_error(error):
 def terminate_and_kill_process(p, term_timeout=5, kill_timeout=2):
     """Terminate child process cleanly; if still alive after timeout, kill it forcefully and ensure stopped."""
     if p is None or p.poll() is not None:
-        return
+        return True
     try:
         p.terminate()
     except Exception:
@@ -218,7 +220,40 @@ def terminate_and_kill_process(p, term_timeout=5, kill_timeout=2):
             p.kill()
             p.wait(timeout=kill_timeout)
         except Exception:
-            pass
+            if os.name == "nt" and p.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(int(p.pid)), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    p.wait(timeout=2)
+                except Exception:
+                    pass
+    return p.poll() is not None
+
+
+def small_image_job(job):
+    expected = int(job.get("expected_bytes") or 0)
+    filename = str(job.get("original_filename") or "").lower()
+    mime = str(job.get("mime_type") or "").lower()
+    return (0 < expected <= SMALL_IMAGE_MAX_BYTES and (
+        mime.startswith("image/") or job.get("media_variant") == "thumbnail"
+        or filename.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+    ))
+
+
+def progress_signature(path):
+    current, total, stage = progress_info(path)
+    return (stage, current, total) if stage is not None else None
+
+
+def finish_size_rejected(exc):
+    return "v5_mirror_size_mismatch:" in str(exc)
+
+
+def rejected_success_completion(completion):
+    return {
+        "job_id": completion["job_id"], "attempt": completion["attempt"],
+        "ok": False, "error": "mirror_finish_size_mismatch"
+    }
 
 
 def save_finish_failure_log(job_id, failure_record):
@@ -335,6 +370,19 @@ def flush_pending_finishes(config):
             if any(term in err_str for term in ("v5_mirror_lease_fenced", "not_owned", "v5_mirror_job_not_owned", "409", "410")):
                 print(f"Dropping obsolete pending finish for job {job_id}: {exc}", flush=True)
                 path_obj.unlink(missing_ok=True)
+            elif completion.get("ok") is True and finish_size_rejected(exc):
+                # The success payload cannot ever pass strict server validation.
+                # Release this exact attempt via the canonical finish RPC, so a
+                # retry can fetch the indexed Telegram photo size instead.
+                failure = rejected_success_completion(completion)
+                save_pending_finish(job_id, failure)
+                try:
+                    api(config, "v5-mirror-finish", failure, timeout=20)
+                    remove_pending_finish(job_id)
+                    replayed += 1
+                except Exception as release_exc:
+                    print(f"Pending failed finish for job {job_id}: {release_exc}", flush=True)
+                    break
             else:
                 print(f"Pending finish retry for job {job_id} failed: {exc}", flush=True)
                 break
@@ -352,16 +400,16 @@ def choose_v5_profile(config, channel, source_id, allow_busy=False):
         if cache_key in _SOURCE_ACCESS_CACHE and (now - _SOURCE_ACCESS_CACHE[cache_key]) < SOURCE_ACCESS_CACHE_TTL:
             return profile
         try:
-            asyncio.run(verify_access(profile, channel))
+            asyncio.run(asyncio.wait_for(verify_access(profile, channel), timeout=30))
             _SOURCE_ACCESS_CACHE[cache_key] = now
-            api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": True})
+            api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": True}, timeout=15)
             return profile
         except Exception as exc:
             _SOURCE_ACCESS_CACHE.pop(cache_key, None)
             err_code = classify_telegram_error(exc)
             _LAST_SOURCE_ACCESS_ERROR = err_code
             try:
-                api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": False, "error": err_code})
+                api(config, "source-access", {"profile_id": profile["id"], "source_id": source_id, "ok": False, "error": err_code}, timeout=15)
             except Exception:
                 pass
     return None
@@ -427,12 +475,15 @@ def run_job(config, job, stop_event, status_callback=None):
         profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
         if not profile:
             access_err = _LAST_SOURCE_ACCESS_ERROR or "reader_source_access_denied"
-            api(config, "v5-mirror-finish", {
+            failure = {
                 "job_id": job_id,
                 "ok": False,
                 "error": access_err,
                 "attempt": parsed_job_attempt
-            })
+            }
+            save_pending_finish(job_id, failure)
+            api(config, "v5-mirror-finish", failure)
+            remove_pending_finish(job_id)
             raise RuntimeError(access_err)
         profile_id = str(profile["id"])
     else:
@@ -457,7 +508,19 @@ def run_job(config, job, stop_event, status_callback=None):
             api(config, "finish-job", {"job_id": job_id, "ok": False, "error": err_code})
             raise RuntimeError(err_code) from exc
 
-    api(config, "profile-status", {"profile_id": profile_id, "status": "busy"})
+    try:
+        api(config, "profile-status", {"profile_id": profile_id, "status": "busy"})
+    except Exception:
+        if job_type == "v5_mirror":
+            failure = {"job_id": job_id, "attempt": parsed_job_attempt,
+                       "ok": False, "error": "reader_profile_busy_update_failed"}
+            save_pending_finish(job_id, failure)
+            try:
+                api(config, "v5-mirror-finish", failure, timeout=20)
+                remove_pending_finish(job_id)
+            except Exception:
+                pass
+        raise
     env = os.environ.copy()
     env.update({
         "TELEGRAM_API_ID": str(profile["api_id"]),
@@ -529,11 +592,27 @@ def run_job(config, job, stop_event, status_callback=None):
             consecutive_heartbeat_failures = 0
             max_heartbeat_failures = 3
             lease_lost = False
+            watchdog_abort = False
+            stalled_since = time.monotonic()
+            last_signature = None
             while process.poll() is None:
                 if stop_event.is_set():
-                    terminate_and_kill_process(process)
+                    if not terminate_and_kill_process(process):
+                        raise RuntimeError("reader_shutdown_child_termination_unconfirmed")
                     break
                 now_ts = time.time()
+                if job_type == "v5_mirror" and small_image_job(job):
+                    signature = progress_signature(progress_file)
+                    if signature != last_signature:
+                        last_signature = signature
+                        stalled_since = time.monotonic()
+                    elif time.monotonic() - stalled_since >= SMALL_IMAGE_STALL_SECONDS:
+                        print(f"[WARN] Small image job {job_id} stalled at {signature}; terminating child.", flush=True)
+                        if not terminate_and_kill_process(process):
+                            stop_event.set()  # Fail closed: never claim while the old child may upload.
+                            raise RuntimeError("reader_watchdog_child_termination_unconfirmed")
+                        watchdog_abort = True
+                        break
                 heartbeat_interval = 2.5 if job_type == "v5_mirror" else 10
                 if now_ts - last_heartbeat >= heartbeat_interval:
                     if job_type == "v5_mirror":
@@ -570,7 +649,9 @@ def run_job(config, job, stop_event, status_callback=None):
                             if is_fenced or consecutive_heartbeat_failures >= max_heartbeat_failures:
                                 lease_lost = True
                                 print(f"[CRITICAL] Lease lost or heartbeat failure budget exhausted for job {job_id}. Supervising child worker termination.", flush=True)
-                                terminate_and_kill_process(process)
+                                if not terminate_and_kill_process(process):
+                                    stop_event.set()
+                                    raise RuntimeError("reader_lease_lost_child_termination_unconfirmed")
                                 break
                     else:
                         current, total = progress_value(progress_file)
@@ -599,18 +680,21 @@ def run_job(config, job, stop_event, status_callback=None):
             if lease_lost:
                 print(f"[ERROR] Job {job_id} aborted due to heartbeat lease failure. Not submitting success.", flush=True)
                 try:
-                    api(config, "v5-mirror-finish", {
+                    failure = {
                         "job_id": job_id,
                         "ok": False,
                         "error": "heartbeat_lease_lost",
                         "attempt": parsed_job_attempt
-                    })
+                    }
+                    save_pending_finish(job_id, failure)
+                    api(config, "v5-mirror-finish", failure)
+                    remove_pending_finish(job_id)
                 except Exception:
                     pass
                 raise RuntimeError("heartbeat_lease_lost")
 
-            ok = code == 0 and result.get("ok") is True
-            error = None if ok else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000]
+            ok = not watchdog_abort and code == 0 and result.get("ok") is True
+            error = None if ok else ("reader_small_image_stalled" if watchdog_abort else str(result.get("error") or f"v5_mirror_exit_{code}")[:2000])
             if not ok and error and any(term in error.lower() for term in ("access_denied", "channelprivate", "chatadminrequired", "authkey", "userdeactivated", "session")):
                 invalidate_source_access_cache(source_id, channel, profile_id)
             completion = {
@@ -640,6 +724,7 @@ def run_job(config, job, stop_event, status_callback=None):
                 completion["telemetry"] = telem
 
             finish_start = time.time()
+            save_pending_finish(job_id, completion)
             try:
                 finish_res = api(config, "v5-mirror-finish", completion)
                 remove_pending_finish(job_id)
@@ -653,8 +738,14 @@ def run_job(config, job, stop_event, status_callback=None):
                         "timestamp": time.time()
                     })
             except Exception as finish_exc:
-                if ok:
-                    save_pending_finish(job_id, completion)
+                if ok and finish_size_rejected(finish_exc):
+                    failure = rejected_success_completion(completion)
+                    save_pending_finish(job_id, failure)
+                    try:
+                        api(config, "v5-mirror-finish", failure, timeout=20)
+                        remove_pending_finish(job_id)
+                    except Exception as release_exc:
+                        print(f"[WARN] Failed to release rejected mirror result for job {job_id}: {release_exc}", flush=True)
                 failure_record = {
                     "job_id": job_id,
                     "attempt": parsed_job_attempt,
@@ -692,7 +783,8 @@ def run_job(config, job, stop_event, status_callback=None):
             raise RuntimeError(error if job_type == "v5_mirror" else f"{job_type}_exit_{code}")
     finally:
         if 'process' in locals() and process and process.poll() is None:
-            terminate_and_kill_process(process)
+            if not terminate_and_kill_process(process):
+                stop_event.set()
         with _ACTIVE_MIRRORS_LOCK:
             _ACTIVE_SUBPROCESSES.pop(job_id, None)
             _ACTIVE_MIRRORS.pop(job_id, None)
@@ -976,8 +1068,13 @@ def agent_loop(stop_event, status_callback=None):
                     stop_event.set()
                     break
                 config = recover_busy_profiles_for_one_shot(config)
-            else:
+            elif active_mirror_stats()[0] == 0:
+                # The worker may be submitting its own finish right now. Replay
+                # only after it has left the active slot to avoid parallel RPCs.
                 flush_pending_finishes(config)
+                if list_pending_finishes():
+                    stop_event.wait(5)
+                    continue
 
             total_active, has_prod, benchmark_count = active_mirror_stats()
 

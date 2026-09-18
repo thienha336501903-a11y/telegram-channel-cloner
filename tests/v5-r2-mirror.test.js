@@ -70,7 +70,7 @@ test('V5 mirror can persist Telegram video thumbnails as separate private R2 ass
   assert.match(jobs, /media_variant: mediaVariant/);
   assert.match(jobs, /telegramMetadata\.variant === 'thumbnail'/);
   assert.match(worker, /async def download_thumbnail/);
-  assert.match(worker, /client\.download_media\(message, file=str\(target\), thumb=-1\)/);
+  assert.match(worker, /client\.download_media\(message, file=str\(target\), thumb=matches\[0\] if matches else -1\)/);
   assert.match(worker, /args\.media_variant == "thumbnail"/);
   assert.match(agent, /"--media-variant", str\(job\.get\("media_variant"\) or "media"\)/);
   assert.match(managedAgent, /"--media-variant", str\(job\.get\("media_variant"\) or "media"\)/);
