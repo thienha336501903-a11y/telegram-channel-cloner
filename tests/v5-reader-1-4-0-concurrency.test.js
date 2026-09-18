@@ -109,7 +109,8 @@ test('12. Existing Reader config from 1.3.4 loads seamlessly in 1.4.0', () => {
 
 test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
   assert.match(jobs, /async function selectMany\(path\) \{/);
-  assert.match(jobs, /const runningJobs = await selectMany\(/);
+  assert.match(jobs, /const runningRows = await selectMany\(/);
+  assert.match(jobs, /const runningJobs = runningRows\.filter\(/);
 });
 
 test('14. Benchmark/canary workers can share active local profile only through server-returned benchmark scheduling bit', () => {
