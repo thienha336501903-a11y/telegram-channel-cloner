@@ -17,22 +17,21 @@ test('1. mirror_v5_r2.py supports --progress-file and reports download and uploa
 });
 
 test('2. Video / document integrity is strictly preserved (size mismatch raises exception)', () => {
-  assert.match(worker, /if not is_photo:\s*\n\s*raise RuntimeError\(f"telegram_download_size_mismatch:\{actual\}\/\{total\}"\)/);
+  assert.match(worker, /if expected_bytes and actual != int\(expected_bytes\):\s*\n\s*raise RuntimeError\(f"telegram_download_size_mismatch:\{actual\}\/\{expected_bytes\}"\)/);
   assert.match(jobs, /if \(!isPhotoOrThumbnail\(asset\) && expectedBytes !== null && expectedBytes > 0 && reportedBytes !== expectedBytes\) \{\s*\n\s*throw new Error\(`v5_mirror_size_mismatch:\$\{reportedBytes\}\/\$\{expectedBytes\}`\);/);
 });
 
-test('3. Telegram photo size mismatch performs fresh-download validation and unlinks partial cache', () => {
-  assert.match(worker, /print\(f"Telegram photo size mismatch \(\{actual\}\/\{total\}\), performing fresh download validation\.\.\.", flush=True\)/);
+test('3. Telegram photo chooses indexed size and rejects divergent representation before upload', () => {
+  assert.match(worker, /photo_size = exact_photo_size\(message, expected_bytes\)/);
   assert.match(worker, /target\.unlink\(missing_ok=True\)/);
-  assert.match(worker, /downloaded = await client\.download_media\(message\.media, file=str\(target\)\)/);
-  assert.match(worker, /if not downloaded or not target\.exists\(\):\s*\n\s*raise RuntimeError\("telegram_photo_fresh_download_missing"\)/);
-  assert.match(worker, /if actual <= 0:\s*\n\s*raise RuntimeError\("telegram_photo_fresh_download_empty"\)/);
-  assert.match(worker, /print\(f"Telegram photo fresh download validated: \{actual\} bytes \(was expected \{total\}\)", flush=True\)/);
+  assert.match(worker, /downloaded = await client\.download_media\(message, file=str\(target\), thumb=photo_size\)/);
+  assert.match(worker, /raise RuntimeError\(f"telegram_photo_size_mismatch:\{actual\}\/\{expected_bytes\}"\)/);
 });
 
-test('4. Telegram thumbnail accepts fresh download size and validates non-empty', () => {
+test('4. Telegram thumbnail chooses indexed size and rejects mismatch', () => {
   assert.match(worker, /async def download_thumbnail\(client, entity, message_id, target, expected_bytes=0, progress_file=None\):/);
-  assert.match(worker, /if expected > 0 and actual != expected:\s*\n\s*print\(f"Telegram thumbnail size mismatch \(\{actual\}\/\{expected\}\), fresh download accepted", flush=True\)/);
+  assert.match(worker, /thumb=matches\[0\] if matches else -1/);
+  assert.match(worker, /raise RuntimeError\(f"telegram_thumbnail_size_mismatch:\{actual\}\/\{expected\}"\)/);
   assert.match(jobs, /asset\.metadata\?\.telegram\?\.variant === 'thumbnail'/);
 });
 
