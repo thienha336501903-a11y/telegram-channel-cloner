@@ -817,7 +817,15 @@ def upload_small_object(client, bucket, key, local_path, content_type, progress_
     return {"bytes": total_bytes, "etag": etag or head.get("etag"), "upload_method": "put_object"}
 
 
-def upload_resumable(local_path, object_key, asset_id, content_type, progress_file=None, timer=None):
+def upload_resumable(
+    local_path,
+    object_key,
+    asset_id,
+    content_type,
+    progress_file=None,
+    timer=None,
+    allow_verified_image_replace=False,
+):
     bucket = bucket_name()
     client = r2_client()
     checkpoint_path = cache_root() / f"{asset_id}.r2.json"
@@ -838,6 +846,25 @@ def upload_resumable(local_path, object_key, asset_id, content_type, progress_fi
 
     existing_any = head_matching_object(client, bucket, object_key, None)
     if existing_any and existing_any["bytes"] != total_bytes:
+        # A pre-1.4.7 Reader could upload Telegram's largest rendered photo
+        # instead of the exact indexed photo bytes. Only replace that stale
+        # object after this attempt has downloaded and byte-verified a small
+        # image/thumbnail. Videos and all other conflicts remain fail-closed.
+        if allow_verified_image_replace and total_bytes < SMALL_OBJECT_THRESHOLD_BYTES:
+            print(
+                f"Replacing stale R2 image object: {existing_any['bytes']} -> {total_bytes} bytes",
+                flush=True,
+            )
+            checkpoint_path.unlink(missing_ok=True)
+            return upload_small_object(
+                client,
+                bucket,
+                object_key,
+                local_path,
+                content_type,
+                progress_file=progress_file,
+                timer=timer,
+            )
         raise RuntimeError(f"v5_mirror_r2_size_conflict:{existing_any['bytes']}_vs_{total_bytes}")
 
     # Small object fast path (< 8 MiB) avoids 3-step multipart overhead
@@ -1095,7 +1122,19 @@ async def run(args, timer=None):
                 "checksum_sha256": checksum_sha256,
             })
 
-        uploaded = upload_resumable(upload_path, args.object_key, args.asset_id, args.mime_type, progress_file=progress_file, timer=timer)
+        uploaded = upload_resumable(
+            upload_path,
+            args.object_key,
+            args.asset_id,
+            args.mime_type,
+            progress_file=progress_file,
+            timer=timer,
+            allow_verified_image_replace=(
+                is_photo
+                and expected > 0
+                and upload_bytes == expected
+            ),
+        )
         actual_bytes = upload_bytes
         if uploaded["bytes"] != actual_bytes:
             raise RuntimeError(f"mirror_size_mismatch:{uploaded['bytes']}/{actual_bytes}")

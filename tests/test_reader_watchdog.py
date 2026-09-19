@@ -111,6 +111,71 @@ class ReaderRecoveryTests(unittest.TestCase):
         self.assertEqual(client.selected, "m")
         self.assertEqual(downloaded, 65_764)
 
+    def test_verified_small_image_replaces_stale_wrong_size_r2_object(self):
+        class Client:
+            def __init__(self):
+                self.body = b"o" * 90_738
+                self.put_calls = 0
+
+            def head_object(self, Bucket, Key):
+                return {"ContentLength": len(self.body), "ETag": '"etag"'}
+
+            def put_object(self, Bucket, Key, Body, ContentType):
+                self.put_calls += 1
+                self.body = bytes(Body)
+                return {"ETag": '"new-etag"'}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "telegram-31.jpg"
+            source.write_bytes(b"x" * 73_547)
+            client = Client()
+            with patch.object(mirror, "bucket_name", return_value="bucket"), \
+                 patch.object(mirror, "r2_client", return_value=client), \
+                 patch.object(mirror, "cache_root", return_value=root):
+                uploaded = mirror.upload_resumable(
+                    source,
+                    "course/photo.jpg",
+                    "asset-photo",
+                    "image/jpeg",
+                    allow_verified_image_replace=True,
+                )
+
+        self.assertEqual(client.put_calls, 1)
+        self.assertEqual(len(client.body), 73_547)
+        self.assertEqual(uploaded["bytes"], 73_547)
+        self.assertEqual(uploaded["upload_method"], "put_object")
+
+    def test_r2_size_conflict_remains_fail_closed_without_verified_image(self):
+        class Client:
+            put_calls = 0
+
+            def head_object(self, Bucket, Key):
+                return {"ContentLength": 92_554, "ETag": '"old-etag"'}
+
+            def put_object(self, **kwargs):
+                self.put_calls += 1
+                raise AssertionError("conflicting non-image object must not be overwritten")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "video.mp4"
+            source.write_bytes(b"x" * 76_666)
+            client = Client()
+            with patch.object(mirror, "bucket_name", return_value="bucket"), \
+                 patch.object(mirror, "r2_client", return_value=client), \
+                 patch.object(mirror, "cache_root", return_value=root):
+                with self.assertRaisesRegex(RuntimeError, "v5_mirror_r2_size_conflict:92554_vs_76666"):
+                    mirror.upload_resumable(
+                        source,
+                        "course/video.mp4",
+                        "asset-video",
+                        "video/mp4",
+                        allow_verified_image_replace=False,
+                    )
+
+        self.assertEqual(client.put_calls, 0)
+
     def test_stalled_small_image_terminates_before_failed_finish_with_same_attempt(self):
         class Process:
             returncode = None

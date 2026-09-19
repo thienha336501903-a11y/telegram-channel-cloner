@@ -46,7 +46,7 @@ test('2. Remux command uses strictly -c copy -movflags +faststart -f mp4 without
 
 test('3. Upload uses remux output path and verifies R2 HEAD matches output bytes', () => {
   assert.match(worker, /upload_path = remux_path/);
-  assert.match(worker, /uploaded = upload_resumable\(upload_path,/);
+  assert.match(worker, /uploaded = upload_resumable\(\s*upload_path,/);
   assert.match(worker, /actual_bytes = upload_bytes/);
   assert.match(worker, /if uploaded\["bytes"\] != actual_bytes:\s*\n\s*raise RuntimeError\(f"mirror_size_mismatch:\{uploaded\['bytes'\]\}\/\{actual_bytes\}"\)/);
 });
