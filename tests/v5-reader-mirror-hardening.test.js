@@ -24,13 +24,13 @@ test('2. Video / document integrity is strictly preserved (size mismatch raises 
 test('3. Telegram photo chooses indexed size and rejects divergent representation before upload', () => {
   assert.match(worker, /photo_size = exact_photo_size\(message, expected_bytes\)/);
   assert.match(worker, /target\.unlink\(missing_ok=True\)/);
-  assert.match(worker, /downloaded = await client\.download_media\(message, file=str\(target\), thumb=photo_size\)/);
+  assert.match(worker, /thumb=telegram_thumb_selector\(photo_size\)/);
   assert.match(worker, /raise RuntimeError\(f"telegram_photo_size_mismatch:\{actual\}\/\{expected_bytes\}"\)/);
 });
 
 test('4. Telegram thumbnail chooses indexed size and rejects mismatch', () => {
   assert.match(worker, /async def download_thumbnail\(client, entity, message_id, target, expected_bytes=0, progress_file=None\):/);
-  assert.match(worker, /thumb=matches\[0\] if matches else -1/);
+  assert.match(worker, /thumb=telegram_thumb_selector\(matches\[0\]\) if matches else -1/);
   assert.match(worker, /raise RuntimeError\(f"telegram_thumbnail_size_mismatch:\{actual\}\/\{expected\}"\)/);
   assert.match(jobs, /asset\.metadata\?\.telegram\?\.variant === 'thumbnail'/);
 });

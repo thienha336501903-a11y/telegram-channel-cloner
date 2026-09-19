@@ -44,7 +44,9 @@ class ReaderRecoveryTests(unittest.TestCase):
         self.assertEqual(actions, [])
 
     def test_exact_indexed_photo_variant_and_size_check(self):
-        small = SimpleNamespace(type="x", size=73_547, w=900, h=900)
+        # Telegram commonly represents the indexed JPEG as PhotoSizeProgressive:
+        # no direct ``size`` field, only cumulative progressive byte sizes.
+        small = SimpleNamespace(type="x", sizes=[18_000, 42_000, 73_547], w=900, h=900)
         large = SimpleNamespace(type="y", size=90_738, w=1024, h=1024)
         photo = SimpleNamespace(sizes=[small, large])
         message = SimpleNamespace(media=SimpleNamespace(photo=photo), photo=photo)
@@ -65,7 +67,7 @@ class ReaderRecoveryTests(unittest.TestCase):
             _, downloaded = asyncio.run(mirror.download_resumable(
                 client, None, message, target, expected_bytes=73_547, is_photo=True
             ))
-            self.assertIs(client.selected, small)
+            self.assertEqual(client.selected, "x")
             self.assertEqual(downloaded, 73_547)
 
             client = Client(90_738)
@@ -79,6 +81,35 @@ class ReaderRecoveryTests(unittest.TestCase):
             ))
             with self.assertRaisesRegex(RuntimeError, "telegram_photo_indexed_size_unavailable"):
                 mirror.exact_photo_size(message, 12_345)
+
+    def test_progressive_document_thumbnail_uses_string_selector(self):
+        progressive = SimpleNamespace(type="m", sizes=[12_000, 65_764])
+        document = SimpleNamespace(thumbs=[progressive])
+        message = SimpleNamespace(
+            media=SimpleNamespace(document=document),
+            document=document,
+        )
+
+        class Client:
+            selected = None
+
+            async def download_media(self, msg, file, thumb):
+                self.selected = thumb
+                Path(file).write_bytes(b"x" * 65_764)
+                return file
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client()
+            _, downloaded = asyncio.run(mirror.download_thumbnail(
+                client,
+                None,
+                message,
+                Path(directory) / "thumbnail.jpg",
+                expected_bytes=65_764,
+            ))
+
+        self.assertEqual(client.selected, "m")
+        self.assertEqual(downloaded, 65_764)
 
     def test_stalled_small_image_terminates_before_failed_finish_with_same_attempt(self):
         class Process:
