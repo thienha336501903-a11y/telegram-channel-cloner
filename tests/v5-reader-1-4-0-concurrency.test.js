@@ -103,8 +103,8 @@ test('12. Existing Reader config from 1.3.4 loads seamlessly in 1.4.0', () => {
   assert.match(storage, /def load_config\(\):/);
   assert.match(storage, /value\.get\("version"\) != 1/);
   assert.match(storage, /value\.setdefault\("profiles", \[\]\)/);
-  assert.match(agent, /APP_VERSION = "1\.4\.[1-7]"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.[1-7]"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.[1-8]"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.[1-8]"/);
 });
 
 test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
@@ -113,10 +113,11 @@ test('13. claimV5MirrorJob runtime execution has selectMany defined', () => {
   assert.match(jobs, /const runningJobs = runningRows\.filter\(/);
 });
 
-test('14. Benchmark/canary workers can share active local profile only through server-returned benchmark scheduling bit', () => {
+test('14. V5 can recover a stale busy profile while benchmark concurrency remains server-authorized', () => {
   assert.match(agent, /def ready_profiles\(config, allow_busy=False\):/);
+  assert.match(agent, /def v5_candidate_profiles\(config\):/);
   assert.match(agent, /def choose_v5_profile\(config, channel, source_id, allow_busy=False\):/);
-  assert.match(agent, /profile = choose_v5_profile\(config, channel, source_id, allow_busy=is_benchmark\)/);
+  assert.match(agent, /profile = choose_v5_profile\(config, channel, source_id, allow_busy=True\)/);
   assert.match(jobs, /benchmark: Boolean\(benchmarkObjectKey\) \|\| productionCanary/);
   assert.match(jobs, /production_canary: productionCanary/);
 });
