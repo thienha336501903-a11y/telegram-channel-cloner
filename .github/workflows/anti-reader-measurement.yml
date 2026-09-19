@@ -1,0 +1,56 @@
+name: Anti Reader Measurement Bundle
+
+on:
+  push:
+    branches:
+      - tooling/anti-reader-measurement-20260919
+    paths:
+      - 'tools/anti-reader-measurement/**'
+      - '.github/workflows/anti-reader-measurement.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+          cache: pip
+          cache-dependency-path: tools/anti-reader-measurement/requirements-build.txt
+      - name: Verify exact Python runtime
+        shell: powershell
+        run: |
+          $actual = python -c "import platform; print(platform.python_version())"
+          if ($actual -ne "3.12.10") { throw "Expected Python 3.12.10, got $actual" }
+      - name: Install pinned build dependencies
+        shell: powershell
+        run: |
+          python -m pip install --disable-pip-version-check pip==25.2
+          python -m pip install --disable-pip-version-check -r tools/anti-reader-measurement/requirements-build.txt
+          python -c "import telethon; from telethon.crypto import aes; assert telethon.__version__ == '1.45.0'; assert aes.cryptg is None"
+      - name: Compile and freeze probe
+        shell: powershell
+        run: |
+          python -m py_compile tools/anti-reader-measurement/anti_reader_measure.py tools/anti-reader-measurement/build_packet.py
+          python -m PyInstaller --clean --noconfirm --onefile --console --name AntiReaderMeasure --hidden-import telethon.crypto.aes --hidden-import telethon.crypto.libssl --hidden-import pyaes --hidden-import psutil._pswindows tools/anti-reader-measurement/anti_reader_measure.py
+      - name: Assemble and offline smoke-test packet
+        shell: powershell
+        run: |
+          python tools/anti-reader-measurement/build_packet.py --exe dist/AntiReaderMeasure.exe --output-dir out
+          Get-Content out/ANTI_READER_MEASUREMENT_GENERIC.zip.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ANTI_READER_MEASUREMENT_GENERIC
+          path: |
+            out/ANTI_READER_MEASUREMENT_GENERIC.zip
+            out/ANTI_READER_MEASUREMENT_GENERIC.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
