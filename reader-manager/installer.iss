@@ -1,5 +1,5 @@
 #define MyAppName "Yêu Nấu Ăn Reader"
-#define MyAppVersion "1.4.8"
+#define MyAppVersion "1.4.9"
 #define MyAppExeName "YeuNauAnReader.exe"
 
 [Setup]

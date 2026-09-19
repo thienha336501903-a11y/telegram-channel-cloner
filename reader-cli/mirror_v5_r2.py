@@ -643,6 +643,19 @@ def exact_photo_size(message, expected_bytes):
     return matches[0]
 
 
+def telegram_thumb_selector(item):
+    """Use Telegram's stable size type instead of a progressive-size object.
+
+    Telethon accepts PhotoSizeProgressive when selected by its string type,
+    but its object selector only recognizes the non-progressive size classes.
+    Passing the progressive object therefore returns None without downloading.
+    """
+    selector = str(getattr(item, "type", "") or "").strip()
+    if not selector:
+        raise RuntimeError("telegram_photo_size_selector_missing")
+    return selector
+
+
 async def download_resumable(client, entity, message_id, target, expected_bytes=0, is_photo=False, progress_file=None):
     if hasattr(message_id, "media"):
         message = message_id
@@ -655,7 +668,9 @@ async def download_resumable(client, entity, message_id, target, expected_bytes=
     if photo_size is not None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.unlink(missing_ok=True)
-        downloaded = await client.download_media(message, file=str(target), thumb=photo_size)
+        downloaded = await client.download_media(
+            message, file=str(target), thumb=telegram_thumb_selector(photo_size)
+        )
         if not downloaded or not target.exists():
             raise RuntimeError("telegram_photo_download_missing")
         actual = target.stat().st_size
@@ -720,7 +735,11 @@ async def download_thumbnail(client, entity, message_id, target, expected_bytes=
     matches = [thumb for thumb in thumbs if telegram_size(thumb) == expected] if expected else []
     if expected and not matches:
         raise RuntimeError("telegram_thumbnail_indexed_size_unavailable")
-    downloaded = await client.download_media(message, file=str(target), thumb=matches[0] if matches else -1)
+    downloaded = await client.download_media(
+        message,
+        file=str(target),
+        thumb=telegram_thumb_selector(matches[0]) if matches else -1,
+    )
     if not downloaded or not target.exists():
         raise RuntimeError("telegram_thumbnail_missing")
     actual = target.stat().st_size
