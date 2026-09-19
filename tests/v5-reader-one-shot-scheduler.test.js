@@ -24,9 +24,9 @@ function resolvePython() {
 const pythonBin = resolvePython();
 const managerDir = path.join(repoRoot, 'reader-manager').replace(/\\/g, '/');
 
-test('Reader 1.4.5 exposes explicit one-shot V5 mode without changing the default', () => {
-  assert.match(agent, /APP_VERSION = "1\.4\.7"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.7"/);
+test('Reader 1.4.8 exposes explicit one-shot V5 mode without changing the default', () => {
+  assert.match(agent, /APP_VERSION = "1\.4\.8"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.8"/);
   assert.match(agent, /YEUNAUAN_READER_V5_ONE_SHOT/);
   assert.match(agent, /ONE_SHOT_V5_CANARY_ENABLED/);
   assert.match(agent, /ONE_SHOT_V5_JOB_CLAIMED:/);
@@ -79,7 +79,7 @@ class FakeEvent:
 stop = FakeEvent()
 calls = {"claim_v5": 0, "generic": 0, "start": 0, "stats": 0, "terminate": 0}
 
-a.load_config = lambda: {"agent_token": "tok"}
+a.load_config = lambda: {"agent_token": "tok", "profiles": [{"id": "p1", "status": "ready", "session": "s"}]}
 a.sync_remote_profiles = lambda c: c
 a.list_pending_finishes = lambda: []
 a.recover_busy_profiles_for_one_shot = lambda c: c
@@ -159,7 +159,7 @@ class FakeEvent:
 stop = FakeEvent()
 calls = {"claim_v5": 0}
 
-a.load_config = lambda: {"agent_token": "tok"}
+a.load_config = lambda: {"agent_token": "tok", "profiles": [{"id": "p1", "status": "ready", "session": "s"}]}
 a.sync_remote_profiles = lambda c: c
 a.list_pending_finishes = lambda: []
 a.recover_busy_profiles_for_one_shot = lambda c: c
@@ -212,7 +212,7 @@ class FakeEvent:
 stop = FakeEvent()
 calls = {"generic": 0, "v5": 0, "run": 0}
 
-a.load_config = lambda: {"agent_token": "tok"}
+a.load_config = lambda: {"agent_token": "tok", "profiles": [{"id": "p1", "status": "ready", "session": "s"}]}
 a.sync_remote_profiles = lambda c: c
 a.flush_pending_finishes = lambda c: 0
 a.active_mirror_stats = lambda: (0, False, 0)
@@ -311,9 +311,9 @@ test('GUI shutdown waits for agent cleanup instead of exiting immediately', () =
 });
 
 
-test('Reader 1.4.7 installer never auto-launches and GUI visibly identifies version', () => {
-  assert.match(agent, /APP_VERSION = "1\.4\.7"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.7"/);
+test('Reader 1.4.8 installer never auto-launches and GUI visibly identifies version', () => {
+  assert.match(agent, /APP_VERSION = "1\.4\.8"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.8"/);
   assert.doesNotMatch(installer, /\[Run\]/);
   assert.match(gui, /self\.title\(f"Yêu Nấu Ăn Reader \{APP_VERSION\}"\)/);
 });

@@ -25,7 +25,7 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.7"
+APP_VERSION = "1.4.8"
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -135,6 +135,17 @@ def ready_profiles(config, allow_busy=False):
             or (allow_busy and str(profile.get("status") or "ready") == "busy")
         )
     ]
+
+
+def v5_candidate_profiles(config):
+    """Profiles that may safely service a DB-fenced V5 mirror claim.
+
+    ``busy`` is advisory state left behind when a prior Reader process is
+    interrupted. V5 ownership is enforced by the server lease and attempt
+    generation, so excluding a locally idle busy profile creates a deadlock:
+    the agent can claim work but can never start its worker to clear the state.
+    """
+    return ready_profiles(config, allow_busy=True)
 
 
 _SOURCE_ACCESS_CACHE = {}  # (source_id, channel, profile_id) -> timestamp
@@ -471,8 +482,10 @@ def run_job(config, job, stop_event, status_callback=None):
     parsed_job_attempt = required_job_attempt(job) if job_type == "v5_mirror" else None
 
     if job_type == "v5_mirror":
-        is_benchmark = bool(job.get("benchmark"))
-        profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
+        # A previous interrupted Reader can leave the remote profile marked
+        # busy after its fenced job lease is gone. The V5 job lease/attempt is
+        # the ownership boundary; permit that profile to resume serial work.
+        profile = choose_v5_profile(config, channel, source_id, allow_busy=True)
         if not profile:
             access_err = _LAST_SOURCE_ACCESS_ERROR or "reader_source_access_denied"
             failure = {
@@ -848,6 +861,11 @@ def rate_limit_wait_seconds(error):
         return max(30, min(900, wait + 5)), 15 * 60
     if any(term in text for term in ("timeout", "timed out", "connection reset", "temporarily unavailable")):
         return 30, 5 * 60
+    if "reader_source_access_" in text:
+        # One failed live source preflight must not burn through the remaining
+        # queue in a few seconds. Keep the claimed attempt fenced and pause
+        # before trying a different job from the same source.
+        return 5 * 60, 15 * 60
     return None, None
 
 
@@ -923,7 +941,10 @@ def mirror_worker(config, job, stop_event, status_callback=None):
         limited = apply_mirror_backpressure(exc)
         if status_callback:
             if limited:
-                status_callback(f"Telegram đang giới hạn tạm thời · Reader tự giảm tốc ({str(exc)[:80]})")
+                if "reader_source_access_" in str(exc).lower():
+                    status_callback(f"Telegram chưa truy cập được nguồn · Reader tạm dừng an toàn ({str(exc)[:80]})")
+                else:
+                    status_callback(f"Telegram đang giới hạn tạm thời · Reader tự giảm tốc ({str(exc)[:80]})")
             else:
                 status_callback(f"Mirror tạm lỗi: {str(exc)[:160]}")
     finally:
@@ -939,7 +960,7 @@ def start_mirror_job(config, job, stop_event, status_callback=None):
     channel = str(job.get("channel_ref") or "").strip()
     source_id = str(job.get("source_id") or "")
     is_benchmark = bool(job.get("benchmark"))
-    profile = choose_v5_profile(config, channel, source_id, allow_busy=is_benchmark)
+    profile = choose_v5_profile(config, channel, source_id, allow_busy=True)
     profile_id = str(profile["id"]) if profile else ""
 
     thread = threading.Thread(
@@ -1101,7 +1122,8 @@ def agent_loop(stop_event, status_callback=None):
 
             # Evaluate mirror concurrency slots
             can_claim, slot_type = can_claim_mirror()
-            if can_claim and not (one_shot_v5 and one_shot_claimed):
+            has_v5_profile = bool(v5_candidate_profiles(config))
+            if can_claim and has_v5_profile and not (one_shot_v5 and one_shot_claimed):
                 job = claim_v5_job(config)
                 if job:
                     if one_shot_v5:
@@ -1133,6 +1155,15 @@ def agent_loop(stop_event, status_callback=None):
                             status_callback(f"Đang mirror V5 ({mode_desc}) · {total_active} active job(s)")
                         stop_event.wait(1)
                         continue
+
+            if can_claim and not has_v5_profile and total_active == 0:
+                # Fail closed before the server claim. In particular, do not
+                # consume job attempts when every local profile is paused,
+                # revoked, missing its session, or waiting for re-auth.
+                if status_callback:
+                    status_callback("Chưa có tài khoản Telegram khả dụng · Reader không nhận job")
+                stop_event.wait(5)
+                continue
 
             if total_active > 0:
                 if status_callback:

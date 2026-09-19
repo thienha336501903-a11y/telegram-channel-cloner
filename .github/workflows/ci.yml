@@ -37,8 +37,8 @@ jobs:
           python -m py_compile reader-manager/reader_manager_agent.py
           python -m py_compile reader-manager/reader_manager_gui.py
           python -m py_compile reader-manager/reader_manager_storage.py
-      - name: Reader watchdog and photo recovery tests
-        run: python -m unittest discover -s tests -p 'test_reader_watchdog.py'
+      - name: Reader watchdog, profile recovery, and photo tests
+        run: python -m unittest discover -s tests -p 'test_reader_*.py'
       - name: Secret hygiene
         shell: bash
         run: |
