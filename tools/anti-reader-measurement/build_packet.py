@@ -20,8 +20,8 @@ from pathlib import Path
 import telethon
 
 
-BUNDLE_NAME = "ANTI_READER_MEASUREMENT_GENERIC"
-BUNDLE_VERSION = "1.0.0"
+BUNDLE_NAME = "ANTI_READER_MEASUREMENT_V2_GENERIC"
+BUNDLE_VERSION = "2.0.0"
 BASELINE_MAIN_SHA = "931c064798e1c5e278c88637129397643963fa26"
 
 
@@ -119,6 +119,9 @@ def main() -> int:
             "cryptg_bundled": False,
             "request_size_bytes": 524288,
             "max_requests_inflight": 1,
+            "probe_output_directory_contract": "probe_creates_nonexistent_directory",
+            "network_events_are_diagnostic_warnings": True,
+            "sha256_validation_excluded_from_timed_download": True,
             "measurement_configuration": None,
             "dependency_lock": dependency_lock,
             "safety": {
@@ -150,6 +153,47 @@ def main() -> int:
                 + (smoke.stdout + " " + smoke.stderr).strip()[:1000]
             )
 
+        contract_output = Path(temp_value) / "contract-output"
+        contract = subprocess.run(
+            [
+                str(stage / "AntiReaderMeasure.exe"),
+                "--contract-test",
+                "--bundle-root",
+                str(stage),
+                "--output-dir",
+                str(contract_output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if (
+            contract.returncode != 0
+            or "CONTRACT_TEST_PASS" not in contract.stdout
+            or not (contract_output / "contract-test.json").is_file()
+        ):
+            raise RuntimeError(
+                "frozen output ownership contract test failed: "
+                + (contract.stdout + " " + contract.stderr).strip()[:1000]
+            )
+        repeated_contract = subprocess.run(
+            [
+                str(stage / "AntiReaderMeasure.exe"),
+                "--contract-test",
+                "--bundle-root",
+                str(stage),
+                "--output-dir",
+                str(contract_output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if repeated_contract.returncode == 0 or "output_directory_must_not_exist" not in repeated_contract.stdout:
+            raise RuntimeError("frozen output ownership negative contract test failed")
+
         sum_names = (
             "AntiReaderMeasure.exe",
             "README-ANTI.md",
@@ -159,7 +203,7 @@ def main() -> int:
         )
         sums_path = stage / "SHA256SUMS.txt"
         sums_path.write_text(
-            "".join(f"{sha256(stage / name)}  *{name}\n" for name in sum_names),
+            "".join(f"{sha256(stage / name)} *{name}\n" for name in sum_names),
             encoding="utf-8",
         )
         zip_path = output_dir / f"{BUNDLE_NAME}.zip"
@@ -170,7 +214,7 @@ def main() -> int:
                 archive.write(stage / name, arcname=name)
         bundle_hash = sha256(zip_path)
         (output_dir / f"{BUNDLE_NAME}.zip.sha256").write_text(
-            f"{bundle_hash}  *{zip_path.name}\n", encoding="utf-8"
+            f"{bundle_hash} *{zip_path.name}\n", encoding="utf-8"
         )
         print(json.dumps({"bundle": str(zip_path), "sha256": bundle_hash}, sort_keys=True))
     return 0

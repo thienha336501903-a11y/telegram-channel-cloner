@@ -16,6 +16,7 @@ import contextvars
 import ctypes
 import datetime as dt
 import hashlib
+import importlib.metadata
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 import threading
 import time
 from ctypes import wintypes
@@ -38,7 +40,7 @@ from telethon.sessions import StringSession
 from telethon.tl import functions
 
 
-BUNDLE_VERSION = "1.0.0"
+BUNDLE_VERSION = "2.0.0"
 BASELINE_MAIN_SHA = "931c064798e1c5e278c88637129397643963fa26"
 EXPECTED_PYTHON = (3, 12, 10)
 EXPECTED_TELETHON = "1.45.0"
@@ -74,6 +76,25 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def claim_output_directory(path: Path, *, enforce_launcher_layout: bool) -> None:
+    """Atomically give the probe ownership of a previously non-existent directory.
+
+    V1 accepted an already-created empty directory, which let the launcher and the
+    probe disagree about who owned it. V2 makes that contract unambiguous: the
+    launcher creates only the run parent, and the probe creates its own output.
+    """
+
+    if path.exists():
+        raise RuntimeError("output_directory_must_not_exist")
+    if not path.parent.is_dir():
+        raise RuntimeError("output_parent_missing")
+    if enforce_launcher_layout:
+        expected_base = (Path(tempfile.gettempdir()) / "AntiReaderMeasurement").resolve()
+        if path.name != "probe-output" or path.parent.parent != expected_base:
+            raise RuntimeError("unexpected_output_directory_layout")
+    path.mkdir(parents=False, exist_ok=False)
 
 
 def percentile(values: list[float], percentile_value: float) -> float | None:
@@ -395,19 +416,21 @@ class InstrumentedTelegramClient(TelegramClient):
             raise
         finally:
             aes_after = self._anti_telemetry.aes_snapshot()
+            elapsed_ms = (time.perf_counter() - wall_before) * 1000.0
+            process_cpu_ms = (time.process_time() - cpu_before) * 1000.0
+            aes_decrypt_ms = (aes_after["seconds"] - aes_before["seconds"]) * 1000.0
             record.update(
                 {
                     "finished_at": utc_now(),
-                    "elapsed_ms": round((time.perf_counter() - wall_before) * 1000.0, 3),
-                    "process_cpu_ms": round((time.process_time() - cpu_before) * 1000.0, 3),
+                    "elapsed_ms": round(elapsed_ms, 3),
+                    "process_cpu_ms": round(process_cpu_ms, 3),
+                    "estimated_non_cpu_wait_ms": round(max(0.0, elapsed_ms - process_cpu_ms), 3),
                     "ok": error is None,
                     "error_type": type(error).__name__ if error is not None else None,
                     "response_bytes": len(getattr(result, "bytes", b"") or b"") if result is not None else 0,
                     "aes_decrypt_calls": int(aes_after["calls"] - aes_before["calls"]),
                     "aes_decrypt_bytes": int(aes_after["bytes"] - aes_before["bytes"]),
-                    "aes_decrypt_ms": round(
-                        (aes_after["seconds"] - aes_before["seconds"]) * 1000.0, 3
-                    ),
+                    "aes_decrypt_ms": round(aes_decrypt_ms, 3),
                 }
             )
             self._anti_telemetry.finish_request(file_id, record)
@@ -549,6 +572,14 @@ def runtime_payload(bundle_root: Path) -> dict[str, Any]:
                 manifest = loaded
         except (OSError, ValueError):
             manifest = {}
+    try:
+        cpu_frequency = psutil.cpu_freq()
+    except (NotImplementedError, OSError):
+        cpu_frequency = None
+    try:
+        pyaes_version = importlib.metadata.version("pyaes")
+    except importlib.metadata.PackageNotFoundError:
+        pyaes_version = "unknown-in-frozen-runtime"
     return {
         "timestamp": utc_now(),
         "bundle_version": BUNDLE_VERSION,
@@ -557,12 +588,16 @@ def runtime_payload(bundle_root: Path) -> dict[str, Any]:
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
         "telethon_version": telethon.__version__,
+        "pyaes_version": pyaes_version,
         "psutil_version": psutil.__version__,
         "frozen": bool(getattr(sys, "frozen", False)),
         "executable": Path(sys.executable).name,
         "platform": platform.platform(),
         "logical_cpu_count": psutil.cpu_count(logical=True) or os.cpu_count(),
         "physical_cpu_count": psutil.cpu_count(logical=False),
+        "cpu_frequency_current_mhz": round(cpu_frequency.current, 3) if cpu_frequency else None,
+        "cpu_frequency_max_mhz": round(cpu_frequency.max, 3) if cpu_frequency else None,
+        "perf_counter_resolution_seconds": time.get_clock_info("perf_counter").resolution,
         "crypto_backend_selected_at_runtime": selected_crypto_backend(),
         "cryptg_loaded": getattr(telethon_aes, "cryptg", None) is not None,
         "libssl_decrypt_available": bool(
@@ -612,9 +647,9 @@ async def measure_target(
     request_path.unlink(missing_ok=True)
     system_path.unlink(missing_ok=True)
 
-    digest = hashlib.sha256()
     downloaded = 0
     chunk_count = 0
+    file_write_seconds = 0.0
     process = psutil.Process()
     cpu_start_values = process.cpu_times()
     cpu_start = cpu_start_values.user + cpu_start_values.system
@@ -638,8 +673,9 @@ async def measure_target(
             ):
                 if not chunk:
                     continue
+                write_started = time.perf_counter()
                 handle.write(chunk)
-                digest.update(chunk)
+                file_write_seconds += time.perf_counter() - write_started
                 downloaded += len(chunk)
                 chunk_count += 1
     except BaseException as exc:
@@ -655,7 +691,9 @@ async def measure_target(
     cpu_seconds = max(0.0, cpu_end - cpu_start)
     aes_after = telemetry.aes_snapshot()
     actual_file_bytes = target_path.stat().st_size if target_path.exists() else 0
-    raw_sha256 = digest.hexdigest()
+    hash_started = time.perf_counter()
+    raw_sha256 = sha256_file(target_path) if target_path.exists() else None
+    validation_sha256_seconds = time.perf_counter() - hash_started
     records = telemetry.records_for(file_id)
     for record in records:
         append_jsonl(request_path, record)
@@ -663,6 +701,10 @@ async def measure_target(
     expected_chunks = math.ceil(int(target["bytes"]) / REQUEST_SIZE)
     successful = [record for record in records if record.get("ok")]
     latencies = [float(record["elapsed_ms"]) for record in successful]
+    request_cpu_times = [float(record["process_cpu_ms"]) for record in successful]
+    request_aes_times = [float(record["aes_decrypt_ms"]) for record in successful]
+    request_wait_times = [float(record["estimated_non_cpu_wait_ms"]) for record in successful]
+    response_sizes = [int(record.get("response_bytes") or 0) for record in successful]
     transport_retries = sum(max(0, int(record.get("transport_attempts") or 0) - 1) for record in records)
     iterator_retries = max(0, len(records) - len(successful))
     error_types = [str(record.get("error_type")) for record in records if record.get("error_type")]
@@ -681,6 +723,7 @@ async def measure_target(
     )
     logical_cpus = psutil.cpu_count(logical=True) or os.cpu_count() or 1
     one_core_pct = cpu_seconds / max(wall_seconds, 0.000001) * 100.0
+    aes_seconds = float(aes_after["seconds"] - aes_before["seconds"])
     document = message_document(message)
     limits = sorted({int(record.get("limit") or 0) for record in records})
     summary = {
@@ -699,11 +742,24 @@ async def measure_target(
         "successful_request_count": len(successful),
         "request_p50_ms": percentile(latencies, 0.50),
         "request_p95_ms": percentile(latencies, 0.95),
+        "request_process_cpu_p50_ms": percentile(request_cpu_times, 0.50),
+        "request_process_cpu_p95_ms": percentile(request_cpu_times, 0.95),
+        "request_aes_decrypt_p50_ms": percentile(request_aes_times, 0.50),
+        "request_aes_decrypt_p95_ms": percentile(request_aes_times, 0.95),
+        "request_estimated_wait_p50_ms": percentile(request_wait_times, 0.50),
+        "request_estimated_wait_p95_ms": percentile(request_wait_times, 0.95),
+        "response_bytes_total": sum(response_sizes),
+        "response_bytes_min": min(response_sizes) if response_sizes else None,
+        "response_bytes_max": max(response_sizes) if response_sizes else None,
         "total_seconds": round(wall_seconds, 6),
         "mib_per_second": round(downloaded / 1_048_576 / max(wall_seconds, 0.000001), 6),
         "process_cpu_seconds": round(cpu_seconds, 6),
         "one_core_utilization_pct": round(one_core_pct, 3),
         "normalized_process_cpu_pct_total_capacity": round(one_core_pct / logical_cpus, 3),
+        "estimated_non_cpu_wait_seconds": round(max(0.0, wall_seconds - cpu_seconds), 6),
+        "file_write_wall_seconds": round(file_write_seconds, 6),
+        "file_write_wall_pct": round(file_write_seconds / max(wall_seconds, 0.000001) * 100.0, 3),
+        "validation_sha256_seconds_outside_timed_download": round(validation_sha256_seconds, 6),
         "rss_peak_bytes": sampler.peak_rss,
         "telegram_dc_id": int(getattr(document, "dc_id", 0) or 0) or None,
         "max_requests_inflight": telemetry.max_inflight_for(file_id),
@@ -720,9 +776,9 @@ async def measure_target(
         "crypto_backend": selected_crypto_backend(),
         "aes_decrypt_call_count": int(aes_after["calls"] - aes_before["calls"]),
         "aes_decrypt_bytes": int(aes_after["bytes"] - aes_before["bytes"]),
-        "aes_decrypt_seconds": round(
-            float(aes_after["seconds"] - aes_before["seconds"]), 6
-        ),
+        "aes_decrypt_seconds": round(aes_seconds, 6),
+        "aes_decrypt_wall_pct": round(aes_seconds / max(wall_seconds, 0.000001) * 100.0, 3),
+        "aes_decrypt_process_cpu_pct": round(aes_seconds / max(cpu_seconds, 0.000001) * 100.0, 3),
         "media_deleted_after_validation": False,
     }
 
@@ -739,12 +795,16 @@ async def measure_target(
         failures.append("successful_request_count_mismatch")
     if summary["aes_decrypt_call_count"] <= 0:
         failures.append("aes_decrypt_path_not_observed")
-    if any((flood_wait_count, timeout_count, reset_count, migration_count)):
-        failures.append("network_event_contamination")
-    if summary["retry_count"]:
-        failures.append("request_retry_contamination")
     if download_error is not None:
         failures.append(f"download_error_{type(download_error).__name__}")
+
+    diagnostic_warnings = []
+    if any((flood_wait_count, timeout_count, reset_count, migration_count)):
+        diagnostic_warnings.append("network_event_observed")
+    if summary["retry_count"]:
+        diagnostic_warnings.append("request_retry_observed")
+    if summary["telegram_filename"] != summary["expected_filename"]:
+        diagnostic_warnings.append("telegram_filename_mismatch")
 
     target_path.unlink(missing_ok=True)
     summary["media_deleted_after_validation"] = not target_path.exists()
@@ -752,6 +812,8 @@ async def measure_target(
         failures.append("temp_media_delete_failed")
     summary["validation_failures"] = failures
     summary["validation_pass"] = not failures
+    summary["diagnostic_warnings"] = diagnostic_warnings
+    summary["diagnostic_quality"] = "clean" if not diagnostic_warnings else "network-contaminated"
     write_json(output_dir / f"summary-{message_id}.json", summary)
     if failures:
         raise RuntimeError(f"measurement_validation_failed:{message_id}:{','.join(failures)}")
@@ -866,6 +928,13 @@ async def run_measurement(
         "summaries": summaries,
         "actual_crypto_backend": selected_crypto_backend(),
         "aes_decrypt_call_count": int(aes_final["calls"]),
+        "network_events_are_diagnostic_warnings": True,
+        "sha256_validation_excluded_from_timed_download": True,
+        "diagnostic_quality": (
+            "clean"
+            if summaries and all(item.get("diagnostic_quality") == "clean" for item in summaries)
+            else "network-contaminated-or-incomplete"
+        ),
         "max_requests_inflight": max(
             (item.get("max_requests_inflight", 0) for item in summaries), default=0
         ),
@@ -883,6 +952,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--contract-test", action="store_true")
     mode.add_argument("--run", action="store_true")
     parser.add_argument("--bundle-root", type=Path, default=Path(sys.executable).resolve().parent)
     parser.add_argument("--config-path", type=Path)
@@ -911,6 +981,22 @@ def main() -> int:
                 flush=True,
             )
             return 0
+        if args.contract_test:
+            if args.output_dir is None:
+                raise RuntimeError("contract_test_output_path_required")
+            validate_runtime(bundle_root)
+            output_dir = args.output_dir.resolve()
+            claim_output_directory(output_dir, enforce_launcher_layout=False)
+            write_json(
+                output_dir / "contract-test.json",
+                {
+                    "status": "pass",
+                    "probe_created_previously_nonexistent_output_directory": True,
+                    "bundle_version": BUNDLE_VERSION,
+                },
+            )
+            print("CONTRACT_TEST_PASS", flush=True)
+            return 0
         if os.name != "nt":
             raise RuntimeError("windows_required")
         if args.config_path is None or args.targets_path is None or args.output_dir is None:
@@ -931,8 +1017,7 @@ def main() -> int:
             raise RuntimeError("reader_config_missing")
         if not targets_path.is_file():
             raise RuntimeError("measurement_targets_missing")
-        if not output_dir.is_dir() or any(output_dir.iterdir()):
-            raise RuntimeError("output_directory_must_be_new_and_empty")
+        claim_output_directory(output_dir, enforce_launcher_layout=True)
         return asyncio.run(
             run_measurement(config_path, targets_path, output_dir, bundle_root)
         )

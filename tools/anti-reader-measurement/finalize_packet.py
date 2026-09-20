@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -45,7 +46,10 @@ def validate_config(value: object) -> dict:
     profile_id = value.get("profile_id")
     channel = value.get("channel")
     targets = value.get("targets")
-    if not isinstance(profile_id, str) or len(profile_id) != 36:
+    if not isinstance(profile_id, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        profile_id,
+    ):
         raise RuntimeError("invalid profile id")
     if not isinstance(channel, str) or not channel.startswith("-100") or not channel[1:].isdigit():
         raise RuntimeError("invalid channel")
@@ -62,9 +66,18 @@ def validate_config(value: object) -> dict:
         filename = target.get("filename")
         if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id < 1 or message_id in seen:
             raise RuntimeError("invalid or duplicate message id")
-        if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 1:
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or not (1 <= byte_count <= 2_147_483_647)
+        ):
             raise RuntimeError("invalid target byte count")
-        if not isinstance(filename, str) or not filename.strip() or len(filename) > 180:
+        if (
+            not isinstance(filename, str)
+            or not filename.strip()
+            or len(filename) > 180
+            or any(character in filename for character in "\r\n")
+        ):
             raise RuntimeError("invalid target filename")
         seen.add(message_id)
         normalized.append(
@@ -98,9 +111,13 @@ def main() -> int:
         )
         manifest_path = root / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("bundle_version") != "2.0.0":
+            raise RuntimeError("generic packet version mismatch")
+        if manifest.get("baseline_main_sha") != "931c064798e1c5e278c88637129397643963fa26":
+            raise RuntimeError("generic packet baseline mismatch")
         if manifest.get("measurement_config_finalized") is not False:
             raise RuntimeError("generic packet is already finalized")
-        manifest["bundle_name"] = "ANTI_READER_MEASUREMENT_BUNDLE"
+        manifest["bundle_name"] = "ANTI_READER_MEASUREMENT_V2_BUNDLE"
         manifest["measurement_config_finalized"] = True
         manifest["measurement_configuration_sha256"] = sha256(root / "measurement-targets.json")
         manifest["measurement_configuration"] = {
@@ -125,7 +142,7 @@ def main() -> int:
             encoding="utf-8",
         )
         (root / "SHA256SUMS.txt").write_text(
-            "".join(f"{sha256(root / name)}  *{name}\n" for name in HASHED_FILES),
+            "".join(f"{sha256(root / name)} *{name}\n" for name in HASHED_FILES),
             encoding="utf-8",
         )
         output = args.output_zip.resolve()

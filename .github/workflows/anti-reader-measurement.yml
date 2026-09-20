@@ -1,9 +1,9 @@
-name: Anti Reader Measurement Bundle
+name: Anti Reader Measurement Bundle V2
 
 on:
   push:
     branches:
-      - tooling/anti-reader-measurement-20260919
+      - tooling/anti-reader-measurement-v2-20260920
     paths:
       - 'tools/anti-reader-measurement/**'
       - '.github/workflows/anti-reader-measurement.yml'
@@ -38,19 +38,20 @@ jobs:
       - name: Compile and freeze probe
         shell: powershell
         run: |
-          python -m py_compile tools/anti-reader-measurement/anti_reader_measure.py tools/anti-reader-measurement/build_packet.py
+          python -m py_compile tools/anti-reader-measurement/anti_reader_measure.py tools/anti-reader-measurement/build_packet.py tools/anti-reader-measurement/finalize_packet.py tools/anti-reader-measurement/test_packet.py
+          python tools/anti-reader-measurement/test_packet.py -v
           python -m PyInstaller --clean --noconfirm --onefile --console --name AntiReaderMeasure --hidden-import telethon.crypto.aes --hidden-import telethon.crypto.libssl --hidden-import pyaes --hidden-import psutil._pswindows tools/anti-reader-measurement/anti_reader_measure.py
       - name: Assemble and offline smoke-test packet
         shell: powershell
         run: |
           python tools/anti-reader-measurement/build_packet.py --exe dist/AntiReaderMeasure.exe --output-dir out
-          Get-Content out/ANTI_READER_MEASUREMENT_GENERIC.zip.sha256
+          Get-Content out/ANTI_READER_MEASUREMENT_V2_GENERIC.zip.sha256
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ANTI_READER_MEASUREMENT_GENERIC
+          name: ANTI_READER_MEASUREMENT_V2_GENERIC
           path: |
-            out/ANTI_READER_MEASUREMENT_GENERIC.zip
-            out/ANTI_READER_MEASUREMENT_GENERIC.zip.sha256
+            out/ANTI_READER_MEASUREMENT_V2_GENERIC.zip
+            out/ANTI_READER_MEASUREMENT_V2_GENERIC.zip.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
