@@ -40,6 +40,18 @@ jobs:
         run: |
           python -m py_compile tools/anti-reader-measurement/anti_reader_measure.py tools/anti-reader-measurement/build_packet.py tools/anti-reader-measurement/finalize_packet.py tools/anti-reader-measurement/test_packet.py
           python tools/anti-reader-measurement/test_packet.py -v
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path tools/anti-reader-measurement/Run-AntiReaderMeasurement.ps1),
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell launcher parse failed"
+          }
+          Write-Host "POWERSHELL_PARSE_PASS"
           python -m PyInstaller --clean --noconfirm --onefile --console --name AntiReaderMeasure --hidden-import telethon.crypto.aes --hidden-import telethon.crypto.libssl --hidden-import pyaes --hidden-import psutil._pswindows tools/anti-reader-measurement/anti_reader_measure.py
       - name: Assemble and offline smoke-test packet
         shell: powershell
