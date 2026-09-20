@@ -10,7 +10,7 @@ analysis = Analysis(
         (str(root / "reader-cli" / "export_history.py"), "reader-cli"),
         (str(root / "reader-cli" / "reconcile_history.py"), "reader-cli"),
     ],
-    hiddenimports=["telethon", "requests", "export_history"],
+    hiddenimports=["telethon", "requests", "export_history", "cryptg"],
 )
 pyz = PYZ(analysis.pure)
 exe = EXE(

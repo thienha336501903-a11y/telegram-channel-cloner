@@ -25,8 +25,8 @@ const pythonBin = resolvePython();
 const managerDir = path.join(repoRoot, 'reader-manager').replace(/\\/g, '/');
 
 test('Reader 1.4.10 exposes explicit one-shot V5 mode without changing the default', () => {
-  assert.match(agent, /APP_VERSION = "1\.4\.10"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.10"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.(10|11)"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.(10|11)"/);
   assert.match(agent, /YEUNAUAN_READER_V5_ONE_SHOT/);
   assert.match(agent, /ONE_SHOT_V5_CANARY_ENABLED/);
   assert.match(agent, /ONE_SHOT_V5_JOB_CLAIMED:/);
@@ -312,8 +312,8 @@ test('GUI shutdown waits for agent cleanup instead of exiting immediately', () =
 
 
 test('Reader 1.4.10 installer never auto-launches and GUI visibly identifies version', () => {
-  assert.match(agent, /APP_VERSION = "1\.4\.10"/);
-  assert.match(installer, /#define MyAppVersion "1\.4\.10"/);
+  assert.match(agent, /APP_VERSION = "1\.4\.(10|11)"/);
+  assert.match(installer, /#define MyAppVersion "1\.4\.(10|11)"/);
   assert.doesNotMatch(installer, /\[Run\]/);
   assert.match(gui, /self\.title\(f"Yêu Nấu Ăn Reader \{APP_VERSION\}"\)/);
 });

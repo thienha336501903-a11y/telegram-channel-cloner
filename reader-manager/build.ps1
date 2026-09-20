@@ -3,9 +3,9 @@ $Root = Split-Path -Parent $PSScriptRoot
 Push-Location $Root
 try {
   python -m pip install --disable-pip-version-check -r reader-cli/requirements.txt pyinstaller==6.15.0
-  python -m PyInstaller --clean --noconfirm --onefile --name YeuNauAnReaderImport reader-cli/export_history.py
-  python -m PyInstaller --clean --noconfirm --onefile --name YeuNauAnReaderReconcile reader-cli/reconcile_history.py
-  python -m PyInstaller --clean --noconfirm --onefile --name YeuNauAnReaderMirror reader-cli/mirror_v5_r2.py
+  python -m PyInstaller --clean --noconfirm --onefile --hidden-import cryptg --name YeuNauAnReaderImport reader-cli/export_history.py
+  python -m PyInstaller --clean --noconfirm --onefile --hidden-import cryptg --name YeuNauAnReaderReconcile reader-cli/reconcile_history.py
+  python -m PyInstaller --clean --noconfirm --onefile --hidden-import cryptg --name YeuNauAnReaderMirror reader-cli/mirror_v5_r2.py
   python -m PyInstaller --clean --noconfirm reader-manager/YeuNauAnReader.spec
   New-Item -ItemType Directory -Force reader-manager/dist | Out-Null
   Copy-Item -Force dist/YeuNauAnReader.exe reader-manager/dist/YeuNauAnReader.exe

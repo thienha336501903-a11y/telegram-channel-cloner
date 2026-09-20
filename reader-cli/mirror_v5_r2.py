@@ -47,6 +47,20 @@ except ImportError:
     local_session = None
     resolve_channel = None
 
+
+def detect_crypto_backend() -> str:
+    """Detect actual AES crypto backend loaded by Telethon."""
+    try:
+        import telethon.crypto.aes as aes_mod
+        if getattr(aes_mod, "cryptg", None) is not None:
+            return "cryptg"
+        libssl = getattr(aes_mod, "libssl", None)
+        if libssl is not None and getattr(libssl, "decrypt_ige", None) is not None:
+            return "libssl"
+        return "pyaes"
+    except Exception:
+        return "unknown"
+
 PART_SIZE = 16 * 1024 * 1024
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
 SMALL_OBJECT_THRESHOLD_BYTES = 8 * 1024 * 1024
@@ -951,6 +965,8 @@ async def run(args, timer=None):
     expected = int(args.expected_bytes or 0)
     progress_file = getattr(args, "progress_file", None)
     cache_reused = "none"
+    crypto_backend = detect_crypto_backend()
+    print(f"[CRYPTO] Telethon crypto backend: {crypto_backend}", flush=True)
 
     if timer:
         timer.start_stage("r2_preflight_head")
@@ -971,7 +987,7 @@ async def run(args, timer=None):
             report_progress(progress_file, "r2_upload", target_expected_bytes, target_expected_bytes)
             print(f"R2 object already complete before retry: {expected} bytes", flush=True)
             transform_ver = "ffmpeg-faststart-v1" if manifest.get("faststart_size") else "original-v1"
-            checksum_val = manifest.get("checksum_sha256")
+            checksum_val = manifest.get("faststart_sha256") or manifest.get("source_sha256")
             if not checksum_val and (remux_path.exists() or local_path.exists()):
                 check_path = remux_path if (manifest.get("faststart_size") and remux_path.exists()) else local_path
                 if check_path.exists():
@@ -1004,6 +1020,7 @@ async def run(args, timer=None):
                     "faststart_remuxed": bool(manifest.get("faststart_size")),
                     "transform_version": transform_ver,
                     "cache_reused": "r2_complete",
+                    "crypto_backend": crypto_backend,
                     "attempt": int(getattr(args, "attempt", 0) or 0),
                 },
             }
@@ -1181,6 +1198,7 @@ async def run(args, timer=None):
                 "faststart_remuxed": faststart_remuxed,
                 "transform_version": transform_ver,
                 "cache_reused": cache_reused,
+                "crypto_backend": crypto_backend,
                 "attempt": int(getattr(args, "attempt", 0) or 0),
             },
         }
@@ -1198,8 +1216,13 @@ async def run(args, timer=None):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"))
+    if "--check-crypto" in sys.argv:
+        backend = detect_crypto_backend()
+        print(f"CRYPTO_BACKEND={backend}", flush=True)
+        return 0
+
+    parser = argparse.ArgumentParser(description="V5 Telegram media to Cloudflare R2 mirror worker")
+    parser.add_argument("--api-id", default=os.getenv("TELEGRAM_API_ID"))
     parser.add_argument("--api-hash", default=os.getenv("TELEGRAM_API_HASH"))
     parser.add_argument("--session", default="telegram-cloner-reader")
     parser.add_argument("--channel", required=True)
@@ -1234,6 +1257,7 @@ def main():
                 "timings_ms": timer.timings,
                 "total_worker_time_ms": timer.total_elapsed_ms(),
                 "attempt": args.attempt,
+                "crypto_backend": detect_crypto_backend(),
             },
         })
         print(f"V5 mirror failed: {exc}", flush=True)

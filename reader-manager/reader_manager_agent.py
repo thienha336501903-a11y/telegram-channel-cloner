@@ -25,7 +25,23 @@ except ImportError:
 from reader_manager_storage import load_config, save_config
 from reader_manager_pairing import DEFAULT_CLONER_URL
 
-APP_VERSION = "1.4.10"
+APP_VERSION = "1.4.11"
+
+
+def detect_crypto_backend() -> str:
+    """Detect actual AES crypto backend loaded by Telethon."""
+    try:
+        import telethon.crypto.aes as aes_mod
+        if getattr(aes_mod, "cryptg", None) is not None:
+            return "cryptg"
+        libssl = getattr(aes_mod, "libssl", None)
+        if libssl is not None and getattr(libssl, "decrypt_ige", None) is not None:
+            return "libssl"
+        return "pyaes"
+    except Exception:
+        return "unknown"
+
+
 CONTROL_PATH = "/api/reader/complete"
 BASE_CAPABILITIES = ["reconcile_v1", "profiles_v1", "progress_v1", "progress_stage_v1", "benchmark_concurrency_v1"]
 V5_MIRROR_CAPABILITY = "v5_r2_mirror_v1"
@@ -1073,6 +1089,8 @@ def agent_loop(stop_event, status_callback=None):
 
     if one_shot_v5:
         print("ONE_SHOT_V5_CANARY_ENABLED", flush=True)
+
+    print(f"Reader Manager {APP_VERSION} starting (crypto_backend={detect_crypto_backend()})", flush=True)
 
     while not stop_event.is_set():
         try:
