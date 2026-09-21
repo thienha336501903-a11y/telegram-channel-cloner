@@ -7,9 +7,14 @@ on:
       - 'reader-manager/**'
       - 'reader-cli/**'
       - '.github/workflows/reader-manager-windows.yml'
+      - '.github/workflows/release-windows.yml'
 
 permissions:
   contents: read
+
+concurrency:
+  group: reader-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -24,7 +29,18 @@ jobs:
       - name: Build installer
         shell: powershell
         run: ./reader-manager/build.ps1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Verify packaged crypto backend
+        shell: powershell
+        run: |
+          $crypto = & "reader-manager/dist/YeuNauAnReaderMirror.exe" --check-crypto
+          Write-Host $crypto
+          if (($crypto | Out-String) -notmatch "CRYPTO_BACKEND=cryptg") {
+            throw "Packaged mirror is not using cryptg"
+          }
+      - name: Upload temporary manual installer
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: YeuNauAnReaderSetup
           path: reader-manager/Output/YeuNauAnReaderSetup.exe
+          retention-days: 3
