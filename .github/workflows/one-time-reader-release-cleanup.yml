@@ -1,0 +1,99 @@
+name: One-time Reader canonical release and artifact cleanup
+
+on:
+  push:
+    branches:
+      - ops/reader-canonical-release-cleanup-20260921
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: one-time-reader-release-cleanup
+  cancel-in-progress: false
+
+jobs:
+  release-and-clean:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CANONICAL_SHA: 5391349839a7ffdf02b394a13f2960a8f4e18abb
+      RELEASE_TAG: reader-v1.4.11
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact canonical main
+        uses: actions/checkout@v4
+        with:
+          ref: 5391349839a7ffdf02b394a13f2960a8f4e18abb
+          persist-credentials: false
+
+      - name: Verify canonical checkout
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:CANONICAL_SHA) { throw "Canonical checkout mismatch: $actual != $env:CANONICAL_SHA" }
+          $version = python -c "import sys; sys.path.insert(0, 'reader-manager'); import reader_manager_agent; print(reader_manager_agent.APP_VERSION)"
+          if ($version.Trim() -ne "1.4.11") { throw "Unexpected Reader version: $version" }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build installer
+        shell: pwsh
+        run: ./reader-manager/build.ps1
+
+      - name: Verify cryptg backend and installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "reader-manager/Output/YeuNauAnReaderSetup.exe")) { throw "Installer missing" }
+          if (-not (Test-Path "reader-manager/dist/YeuNauAnReaderMirror.exe")) { throw "Mirror worker missing" }
+          $crypto = & "reader-manager/dist/YeuNauAnReaderMirror.exe" --check-crypto
+          Write-Host $crypto
+          if (($crypto | Out-String) -notmatch "CRYPTO_BACKEND=cryptg") { throw "Packaged mirror is not using cryptg" }
+
+      - name: Generate SHA-256 manifest
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "reader-manager/Output/YeuNauAnReaderSetup.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  YeuNauAnReaderSetup.exe" | Set-Content -Path "reader-manager/Output/SHA256SUMS.txt" -Encoding ascii
+          Write-Host "SETUP_SHA256=$hash"
+
+      - name: Create canonical Reader release
+        shell: pwsh
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release already exists: $env:RELEASE_TAG" }
+          gh release create $env:RELEASE_TAG "reader-manager/Output/YeuNauAnReaderSetup.exe#YeuNauAnReaderSetup.exe" "reader-manager/Output/SHA256SUMS.txt#SHA256SUMS.txt" --repo $env:GITHUB_REPOSITORY --target $env:CANONICAL_SHA --title "Yêu Nấu Ăn Reader 1.4.11" --notes "Canonical Windows Reader 1.4.11 build from main commit $env:CANONICAL_SHA. Packaged cryptg backend verified before publication."
+          if ($LASTEXITCODE -ne 0) { throw "Release creation failed" }
+
+      - name: Verify release assets before cleanup
+        shell: pwsh
+        run: |
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,targetCommitish,assets | ConvertFrom-Json
+          $names = @($release.assets | ForEach-Object { $_.name })
+          if ($names -notcontains "YeuNauAnReaderSetup.exe") { throw "Release installer missing" }
+          if ($names -notcontains "SHA256SUMS.txt") { throw "Release SHA manifest missing" }
+          Write-Host "RELEASE_VERIFIED tag=$($release.tagName) target=$($release.targetCommitish) assets=$($names -join ',')"
+
+      - name: Delete obsolete Reader Actions artifacts
+        shell: pwsh
+        run: |
+          $raw = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw "Could not list Actions artifacts" }
+          $response = $raw | ConvertFrom-Json
+          $targets = @($response.artifacts | Where-Object { $_.name -eq "YeuNauAnReaderSetup" -or $_.name -like "ANTI_READER_MEASUREMENT*" })
+          $bytesBefore = ($targets | Measure-Object -Property size_in_bytes -Sum).Sum
+          if ($null -eq $bytesBefore) { $bytesBefore = 0 }
+          Write-Host "CLEANUP_TARGETS=$($targets.Count)"
+          Write-Host "CLEANUP_BYTES=$bytesBefore"
+          foreach ($artifact in $targets) {
+            gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$($artifact.id)"
+            if ($LASTEXITCODE -ne 0) { throw "Failed deleting artifact $($artifact.id)" }
+          }
+          $after = (gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts?per_page=100") | ConvertFrom-Json
+          $remaining = @($after.artifacts | Where-Object { $_.name -eq "YeuNauAnReaderSetup" -or $_.name -like "ANTI_READER_MEASUREMENT*" })
+          if ($remaining.Count -ne 0) { throw "Artifact cleanup incomplete: $($remaining.Count) matching artifacts remain" }
+          Write-Host "CLEANUP_COMPLETE deleted=$($targets.Count) bytes=$bytesBefore"
