@@ -1,9 +1,8 @@
 name: CI
 
 on:
-  # Temporary one-run branch trigger; removed after green validation.
   push:
-    branches: [main, 'ops/github-actions-storage-optimization-20260921']
+    branches: [main]
   pull_request:
     branches: [main]
 

@@ -1,10 +1,6 @@
 name: Reader Manager Windows
 
 on:
-  # Temporary one-run branch trigger; removed after green validation.
-  push:
-    branches:
-      - ops/github-actions-storage-optimization-20260921
   workflow_dispatch:
   pull_request:
     paths:
