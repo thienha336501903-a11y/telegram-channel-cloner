@@ -2,12 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main, 'feature/**', 'feat/**']
+    branches: [main]
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
+
+# Validate every PR and main update without long-lived build artifacts.
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
