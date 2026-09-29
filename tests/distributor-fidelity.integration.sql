@@ -31,6 +31,40 @@ begin
 end
 $$;
 
+create or replace function pg_temp.expect_rewrite_actual_verification(p_work_id uuid, p_generation bigint)
+returns void language plpgsql as $$
+begin
+  begin
+    perform public.tgcloner_distributor_finish_rewrite(
+      p_work_id, 'rewrite-worker', p_generation, '{"actual_verified":false}'::jsonb
+    );
+    raise exception 'integration: expected actual verification requirement';
+  exception when others then
+    if sqlerrm not like '%distributor_rewrite_actual_verification_required%' then raise; end if;
+  end;
+end
+$$;
+
+create or replace function pg_temp.expect_verify_error(
+  p_work_id uuid,
+  p_generation bigint,
+  p_pin bigint,
+  p_summary jsonb,
+  p_expected text
+)
+returns void language plpgsql as $$
+begin
+  begin
+    perform public.tgcloner_distributor_finish_verify(
+      p_work_id, 'verify-worker', p_generation, p_pin, p_summary
+    );
+    raise exception 'integration: expected verify failure %', p_expected;
+  exception when others then
+    if sqlerrm not like ('%' || p_expected || '%') then raise; end if;
+  end;
+end
+$$;
+
 insert into public.tgcloner_sources(chat_id, title, private_link_id, active)
 values ('-100111', 'Source Fidelity', '111', false);
 select id::text as source_a from public.tgcloner_sources where chat_id = '-100111' \gset
@@ -104,19 +138,7 @@ select pg_temp.assert_true(
 );
 select (public.tgcloner_distributor_arm_work(:'rewrite_id'::uuid, 'rewrite-worker', :'rewrite_generation'::bigint)).id;
 
-do $$
-begin
-  begin
-    perform public.tgcloner_distributor_finish_rewrite(
-      :'rewrite_id'::uuid, 'rewrite-worker', :'rewrite_generation'::bigint,
-      '{"actual_verified":false}'::jsonb
-    );
-    raise exception 'integration: expected actual verification requirement';
-  exception when others then
-    if sqlerrm not like '%distributor_rewrite_actual_verification_required%' then raise; end if;
-  end;
-end
-$$;
+select pg_temp.expect_rewrite_actual_verification(:'rewrite_id'::uuid, :'rewrite_generation'::bigint);
 
 select (public.tgcloner_distributor_finish_rewrite(
   :'rewrite_id'::uuid, 'rewrite-worker', :'rewrite_generation'::bigint,
@@ -144,19 +166,10 @@ select pg_temp.assert_true(
 select id::text as id, lease_generation::text as generation
 from public.tgcloner_distributor_claim_work('verify-worker', 1, 60) \gset verify_
 
-do $$
-begin
-  begin
-    perform public.tgcloner_distributor_finish_verify(
-      :'verify_id'::uuid, 'verify-worker', :'verify_generation'::bigint,
-      9999, '{"test":"bad_pin"}'::jsonb
-    );
-    raise exception 'integration: expected destination pin mismatch';
-  exception when others then
-    if sqlerrm not like '%distributor_verify_pin_mismatch%' then raise; end if;
-  end;
-end
-$$;
+select pg_temp.expect_verify_error(
+  :'verify_id'::uuid, :'verify_generation'::bigint, 9999,
+  '{"test":"bad_pin"}'::jsonb, 'distributor_verify_pin_mismatch'
+);
 
 -- Same-message content drift does not change the high watermark. The READY
 -- trigger must still refuse it based on mapping fingerprint evidence.
@@ -164,19 +177,10 @@ update public.tgcloner_source_messages
 set text = 'Lesson 1 edited after verification started', updated_at = now()
 where source_id = :'source_a'::uuid and source_message_id = 1;
 
-do $$
-begin
-  begin
-    perform public.tgcloner_distributor_finish_verify(
-      :'verify_id'::uuid, 'verify-worker', :'verify_generation'::bigint,
-      1001, '{"test":"fingerprint_drift"}'::jsonb
-    );
-    raise exception 'integration: expected source fingerprint drift rejection';
-  exception when others then
-    if sqlerrm not like '%distributor_verify_source_fingerprint_drift%' then raise; end if;
-  end;
-end
-$$;
+select pg_temp.expect_verify_error(
+  :'verify_id'::uuid, :'verify_generation'::bigint, 1001,
+  '{"test":"fingerprint_drift"}'::jsonb, 'distributor_verify_source_fingerprint_drift'
+);
 
 update public.tgcloner_source_messages
 set text = 'Lesson 1', updated_at = now()
