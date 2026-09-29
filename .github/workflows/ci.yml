@@ -52,6 +52,12 @@ jobs:
             postgres:17 \
             psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -f tests/distributor-foundation.integration.sql
+          docker run --rm --network host \
+            -e PGPASSWORD=postgres \
+            -v "$PWD:/work" -w /work \
+            postgres:17 \
+            psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f tests/distributor-safe-copy.integration.sql
       - name: JavaScript syntax
         run: npm run check
       - name: Clone configuration isolation
