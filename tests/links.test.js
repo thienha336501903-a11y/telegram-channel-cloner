@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { botApiChatIdToPrivateLinkId, destinationMessageLink, extractInternalLinks, rewriteInternalLinks, rewriteTextAndEntities } from '../lib/links.js';
+import {
+  botApiChatIdToPrivateLinkId,
+  destinationMessageLink,
+  extractInternalEntityLinks,
+  extractInternalLinks,
+  rewriteInternalLinks,
+  rewriteTextAndEntities
+} from '../lib/links.js';
 
 test('converts -100 chat id to private link id', () => {
   assert.equal(botApiChatIdToPrivateLinkId('-1004296153365'), '4296153365');
@@ -56,6 +63,51 @@ test('shifts later Telegram entities when URL length changes', () => {
   });
   assert.equal(result.text, 'X https://t.me/c/7/1234 Y');
   assert.equal(result.entities[1].offset, result.text.lastIndexOf('Y'));
+});
+
+test('rewrites hidden text_link entity URL without changing visible label', () => {
+  const text = 'Bài 1';
+  const entities = [{ type: 'text_link', offset: 0, length: text.length, url: 'https://t.me/c/4296153365/10' }];
+  const result = rewriteTextAndEntities(text, entities, {
+    source: { private_link_id: '4296153365' },
+    destination: { chat_id: '-1007778889990' },
+    mappings: new Map([[10, 417]])
+  });
+  assert.equal(result.text, text);
+  assert.equal(result.entities[0].url, 'https://t.me/c/7778889990/417');
+  assert.equal(result.rewritten, 1);
+  assert.deepEqual(result.unresolved, []);
+});
+
+test('keeps external hidden text_link unchanged', () => {
+  const entities = [{ type: 'text_link', offset: 0, length: 5, url: 'https://example.com/lesson' }];
+  const result = rewriteTextAndEntities('Bài 1', entities, {
+    source: { private_link_id: '4296153365' },
+    destination: { chat_id: '-1007778889990' },
+    mappings: new Map([[10, 417]])
+  });
+  assert.equal(result.entities[0].url, 'https://example.com/lesson');
+  assert.equal(result.rewritten, 0);
+});
+
+test('reports unresolved hidden text_link target', () => {
+  const entities = [{ type: 'text_link', offset: 0, length: 5, url: 'https://t.me/c/4296153365/99' }];
+  const result = rewriteTextAndEntities('Bài X', entities, {
+    source: { private_link_id: '4296153365' },
+    destination: { chat_id: '-1007778889990' },
+    mappings: new Map()
+  });
+  assert.deepEqual(result.unresolved, [99]);
+  assert.equal(result.entities[0].url, 'https://t.me/c/4296153365/99');
+});
+
+test('extracts hidden internal entity links only for source channel', () => {
+  const result = extractInternalEntityLinks([
+    { type: 'text_link', offset: 0, length: 1, url: 'https://t.me/c/4296153365/10' },
+    { type: 'text_link', offset: 2, length: 1, url: 'https://t.me/c/999/20' },
+    { type: 'text_link', offset: 4, length: 1, url: 'https://example.com' }
+  ], { private_link_id: '4296153365' });
+  assert.deepEqual(result.map((x) => x.source_message_id), [10]);
 });
 
 test('builds public destination link when username exists', () => {
