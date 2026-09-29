@@ -13,11 +13,11 @@ import { insert, patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
 async function enqueue(source, normalized, { edited = false, hasInternalLinks = false } = {}) {
-  // Only the current MASTER participates in the clone/mirror queue. Inactive
-  // registered sources are still indexed for V4 course playback, but must not
-  // unexpectedly mirror into generic destinations.
+  // Only explicitly source-bound active destinations participate in legacy live
+  // mirroring. Distributor V2 destinations register inactive and are never a
+  // wildcard target while their durable run is being built/verified.
   if (!source?.active) return;
-  const destinations = (await listDestinations({ activeOnly: true })).filter((d) => d.source_id === source.id || !d.source_id);
+  const destinations = (await listDestinations({ activeOnly: true })).filter((d) => d.source_id === source.id);
   for (const destination of destinations) {
     const [job] = await insert(TABLES.cloneJobs, { source_id: source.id, destination_id: destination.id, mode: 'live_mirror', status: 'queued' });
     if (!edited) {
