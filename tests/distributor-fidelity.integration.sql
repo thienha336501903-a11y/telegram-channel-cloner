@@ -51,6 +51,7 @@ insert into public.tgcloner_source_messages(
 
 \ir ../sql/013_distributor_v2_fidelity_verification.sql
 \ir ../sql/014_distributor_v2_final_verify_guards.sql
+\ir ../sql/015_distributor_v2_text_link_backfill_portable.sql
 
 select pg_temp.assert_true(
   (select has_internal_links from public.tgcloner_source_messages where source_id = :'source_a'::uuid and source_message_id = 2),
