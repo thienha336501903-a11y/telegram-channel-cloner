@@ -18,7 +18,9 @@ export default async function handler(req, res) {
     chat_id: String(chat.id),
     title: chat.title || body.title || null,
     username: chat.username || null,
-    active: body.active !== false,
+    // Distributor V2 destinations are fail-closed. PR2 will activate only after
+    // manifest/catch-up/verification gates pass; registration alone never fan-outs.
+    active: false,
     verified_at: new Date().toISOString()
   });
   json(res, 200, { ok: true, destination: rows[0] });
