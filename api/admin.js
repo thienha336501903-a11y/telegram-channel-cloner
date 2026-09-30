@@ -1,5 +1,6 @@
 import cloneHandler from '../server/admin/clone.js';
 import destinationsHandler from '../server/admin/destinations.js';
+import distributorProgressHandler from '../server/admin/distributor-progress.js';
 import readerJobHandler from '../server/admin/reader-job.js';
 import readerManagerHandler from '../server/admin/reader-manager.js';
 import publicConfigHandler from '../server/admin/public-config.js';
@@ -14,6 +15,7 @@ import { json } from '../lib/http.js';
 const handlers = {
   clone: cloneHandler,
   destinations: destinationsHandler,
+  'distributor-progress': distributorProgressHandler,
   'reader-job': readerJobHandler,
   'reader-manager': readerManagerHandler,
   'public-config': publicConfigHandler,

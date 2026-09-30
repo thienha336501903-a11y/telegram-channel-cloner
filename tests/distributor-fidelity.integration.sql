@@ -204,4 +204,85 @@ select pg_temp.assert_true(
   'verified mapping evidence incomplete'
 );
 
+\ir ../sql/016_distributor_v2_progress_center.sql
+
+select pg_temp.assert_true(
+  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 1
+  and (public.tgcloner_distributor_progress()->'overall'->>'completed_units')::integer
+    = (public.tgcloner_distributor_progress()->'overall'->>'known_units')::integer,
+  'READY run must have a fully verified ledger'
+);
+update public.tgcloner_message_mappings set verified_at = null
+where source_id = :'source_a'::uuid and destination_id = :'dest_a'::uuid and source_message_id = 1;
+select pg_temp.assert_true(
+  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 0,
+  'a missing verified mapping must revoke 100%'
+);
+update public.tgcloner_message_mappings set verified_at = now()
+where source_id = :'source_a'::uuid and destination_id = :'dest_a'::uuid and source_message_id = 1;
+
+insert into public.tgcloner_destinations(source_id, chat_id, title)
+values (:'source_a'::uuid, '-100223', 'Destination still scanning');
+select id::text as dest_b from public.tgcloner_destinations where chat_id = '-100223' \gset
+select (public.tgcloner_distributor_create_run(:'source_a'::uuid, :'dest_b'::uuid, 'initial_backfill')).id::text as run_b \gset
+select pg_temp.assert_true(
+  (public.tgcloner_distributor_progress()->'overall'->>'open_manifests')::integer = 1
+  and jsonb_array_length(public.tgcloner_distributor_progress()->'courses') = 1,
+  'open manifest must keep the source rollup indeterminate'
+);
+select (public.tgcloner_distributor_close_manifest(:'run_b'::uuid, 2, array[1::bigint,2::bigint])).id;
+select pg_temp.assert_true(
+  (select (r->>'known_units')::integer = 3 and (r->>'completed_units')::integer = 0
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'runs') r
+   where r->>'id' = :'run_b'),
+  'closed manifest must count two copy units plus the reserved verification unit'
+);
+
+update public.tgcloner_clone_work
+set status = 'retry_wait', attempt_count = 1, next_attempt_at = now() + interval '5 minutes'
+where run_id = :'run_b'::uuid and phase = 'copy' and source_message_id = 1;
+select pg_temp.assert_true(
+  (select (r->>'retry_items')::integer = 1 and (r->>'completed_units')::integer = 0
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'runs') r
+   where r->>'id' = :'run_b'),
+  'retry must not inflate completed work'
+);
+update public.tgcloner_clone_work
+set status = 'blocked_ambiguous', next_attempt_at = null, side_effect_state = 'ambiguous'
+where run_id = :'run_b'::uuid and phase = 'copy' and source_message_id = 1;
+
+insert into public.tgcloner_source_messages(source_id, source_message_id, message_type, text)
+values (:'source_a'::uuid, 3, 'text', 'Late lesson');
+insert into public.tgcloner_source_events(event_key, source_id, origin, event_kind, source_message_id)
+values ('progress-test:late-lesson', :'source_a'::uuid, 'admin', 'message_new', 3);
+select pg_temp.assert_true(
+  (select (r->>'blocked_items')::integer = 1 and (r->>'lag_events')::integer = 1
+    and (r->>'lag_messages')::integer = 1
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'runs') r
+   where r->>'id' = :'run_b'),
+  'block and actual catch-up lag must be visible for the destination'
+);
+select pg_temp.assert_true(
+  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 0,
+  'new source activity must remove stale 100% from an earlier READY run'
+);
+
+insert into public.tgcloner_sources(chat_id, title, active)
+values ('-100333', 'Album source', false);
+select id::text as source_b from public.tgcloner_sources where chat_id = '-100333' \gset
+insert into public.tgcloner_destinations(source_id, chat_id, title)
+values (:'source_b'::uuid, '-100444', 'Album destination');
+select id::text as dest_c from public.tgcloner_destinations where chat_id = '-100444' \gset
+insert into public.tgcloner_source_messages(source_id, source_message_id, media_group_id, message_type)
+values (:'source_b'::uuid, 11, 'album-1', 'photo'), (:'source_b'::uuid, 12, 'album-1', 'photo');
+select (public.tgcloner_distributor_create_run(:'source_b'::uuid, :'dest_c'::uuid, 'initial_backfill')).id::text as run_c \gset
+select (public.tgcloner_distributor_close_manifest(:'run_c'::uuid, 12, array[11::bigint,12::bigint])).id;
+select pg_temp.assert_true(
+  (select (r->>'manifest_messages')::integer = 2 and (r->>'manifest_copy_units')::integer = 1
+    and (r->>'album_members')::integer = 2 and (r->>'albums')::integer = 1
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'runs') r
+   where r->>'id' = :'run_c'),
+  'album must count as one copy unit while preserving two member messages'
+);
+
 select 'DISTRIBUTOR_FIDELITY_DB_TEST_PASS' as result;
