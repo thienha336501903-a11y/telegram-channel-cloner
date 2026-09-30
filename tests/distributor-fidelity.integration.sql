@@ -207,15 +207,21 @@ select pg_temp.assert_true(
 \ir ../sql/016_distributor_v2_progress_center.sql
 
 select pg_temp.assert_true(
-  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 1
-  and (public.tgcloner_distributor_progress()->'overall'->>'completed_units')::integer
-    = (public.tgcloner_distributor_progress()->'overall'->>'known_units')::integer,
+  (select (r->>'completed_units')::integer = (r->>'known_units')::integer
+    and (r->>'verified_messages')::integer = (r->>'manifest_messages')::integer
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'runs') r
+   where r->>'id' = :'run_a')
+  and (select (c->>'verified_destinations')::integer = 1
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'courses') c
+   where c->>'source_id' = :'source_a'),
   'READY run must have a fully verified ledger'
 );
 update public.tgcloner_message_mappings set verified_at = null
 where source_id = :'source_a'::uuid and destination_id = :'dest_a'::uuid and source_message_id = 1;
 select pg_temp.assert_true(
-  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 0,
+  (select (c->>'verified_destinations')::integer = 0
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'courses') c
+   where c->>'source_id' = :'source_a'),
   'a missing verified mapping must revoke 100%'
 );
 update public.tgcloner_message_mappings set verified_at = now()
@@ -226,8 +232,9 @@ values (:'source_a'::uuid, '-100223', 'Destination still scanning');
 select id::text as dest_b from public.tgcloner_destinations where chat_id = '-100223' \gset
 select (public.tgcloner_distributor_create_run(:'source_a'::uuid, :'dest_b'::uuid, 'initial_backfill')).id::text as run_b \gset
 select pg_temp.assert_true(
-  (public.tgcloner_distributor_progress()->'overall'->>'open_manifests')::integer = 1
-  and jsonb_array_length(public.tgcloner_distributor_progress()->'courses') = 1,
+  (select (c->>'open_manifests')::integer = 1 and (c->>'destinations')::integer = 2
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'courses') c
+   where c->>'source_id' = :'source_a'),
   'open manifest must keep the source rollup indeterminate'
 );
 select (public.tgcloner_distributor_close_manifest(:'run_b'::uuid, 2, array[1::bigint,2::bigint])).id;
@@ -263,7 +270,9 @@ select pg_temp.assert_true(
   'block and actual catch-up lag must be visible for the destination'
 );
 select pg_temp.assert_true(
-  (public.tgcloner_distributor_progress()->'overall'->>'verified_destinations')::integer = 0,
+  (select (c->>'verified_destinations')::integer = 0
+   from jsonb_array_elements(public.tgcloner_distributor_progress()->'courses') c
+   where c->>'source_id' = :'source_a'),
   'new source activity must remove stale 100% from an earlier READY run'
 );
 
