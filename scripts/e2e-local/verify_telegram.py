@@ -8,7 +8,7 @@ from telethon import TelegramClient
 from telethon.tl.types import InputMessagesFilterPinned, MessageEntityTextUrl
 
 BASE = os.getenv('SUPABASE_URL', 'http://127.0.0.1:54321').rstrip('/')
-APIKEY = os.getenv('SUPABASE_SECRET_KEY', 'sb_secret_local_e2e_only_not_a_real_secret')
+APIKEY = os.getenv('SUPABASE_SECRET_KEY', 'sb_secret_e2e')
 SOURCE_CHAT = os.getenv('E2E_SOURCE_CHAT_ID', '').strip()
 DEST_CHATS = [x.strip() for x in os.getenv('E2E_DESTINATION_CHAT_IDS', '').split(',') if x.strip()]
 API_ID = int(os.getenv('TELEGRAM_API_ID', '0') or 0)
