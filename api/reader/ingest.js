@@ -1,7 +1,7 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { authenticateReaderRequest } from '../../lib/reader-manager.js';
-import { extractInternalLinks } from '../../lib/links.js';
 import { hasUsableReaderMtprotoMedia } from '../../lib/reader-media.js';
+import { linksForNormalizedMessage } from '../../lib/source-message.js';
 import { recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { patch, select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
@@ -26,10 +26,9 @@ async function hydrateHistoricalMedia(source, saved, message) {
 
   let forwarded = null;
   try {
-    // Bot API cannot fetch arbitrary old channel messages. Forwarding the source
-    // message back into the same channel returns a full Message object with
-    // reusable file_id / thumbnail metadata. The temporary post is deleted
-    // immediately after the original DB row is hydrated.
+    // Legacy hydration path only. The isolated Distributor E2E harness sets
+    // TGCLONER_READER_NO_SOURCE_MUTATION=true and fails before this code can
+    // temporarily forward/delete anything in the source channel.
     forwarded = await telegram('forwardMessage', {
       chat_id: source.chat_id,
       from_chat_id: source.chat_id,
@@ -82,6 +81,7 @@ export default async function handler(req, res) {
   const source = sources[0];
   if (!source) return json(res, 404, { ok: false, error: 'source_not_found' });
 
+  const noSourceMutation = String(process.env.TGCLONER_READER_NO_SOURCE_MUTATION || '').toLowerCase() === 'true';
   let savedCount = 0;
   let linkCount = 0;
   let hydrationAttempts = 0;
@@ -89,14 +89,30 @@ export default async function handler(req, res) {
   let mtprotoPreserved = 0;
   const hydrationErrors = [];
   for (const m of body.messages) {
-    const textLinks = extractInternalLinks(m.text, source).map((x) => ({ ...x, location: 'text' }));
-    const captionLinks = extractInternalLinks(m.caption, source).map((x) => ({ ...x, location: 'caption' }));
-    const links = [...textLinks, ...captionLinks];
+    const messageType = String(m.message_type || 'other');
+    if (
+      noSourceMutation
+      && m.raw_message?.from_reader
+      && HYDRATABLE_MEDIA_TYPES.has(messageType)
+      && !hasUsableReaderMtprotoMedia(m)
+    ) {
+      return json(res, 409, {
+        ok: false,
+        error: 'reader_media_descriptor_required_no_source_mutation',
+        source_message_id: Number(m.source_message_id) || null,
+        message_type: messageType
+      });
+    }
+
+    // Reader messages already use the same normalized text/entity shape as the
+    // webhook. Reuse one extractor so hidden MessageEntityTextUrl links are
+    // indexed immediately rather than relying on a one-time migration backfill.
+    const links = linksForNormalizedMessage(m, source);
     const [saved] = await upsertSourceMessage({
       source_id: source.id,
       source_message_id: Number(m.source_message_id),
       media_group_id: m.media_group_id || null,
-      message_type: m.message_type || 'other',
+      message_type: messageType,
       text: m.text ?? null,
       text_entities: m.text_entities || [],
       caption: m.caption ?? null,
@@ -111,9 +127,6 @@ export default async function handler(req, res) {
     await recordInternalLinks(source.id, saved.id, links);
 
     if (hasUsableReaderMtprotoMedia(m)) {
-      // Reader descriptors are sufficient for the MTProto media/thumbnail
-      // gateways. Preserve them instead of self-forwarding every historical
-      // media item through Bot API inside one Vercel request.
       mtprotoPreserved += 1;
     } else if (m.raw_message?.from_reader) {
       const hydration = await hydrateHistoricalMedia(source, saved, m);

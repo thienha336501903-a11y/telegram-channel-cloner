@@ -1,6 +1,8 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { requireEnv } from '../../lib/env.js';
 import { normalizeBotChannelPost, linksForNormalizedMessage } from '../../lib/source-message.js';
+import { distributorEventFromUpdate } from '../../lib/distributor-webhook.js';
+import { recordDistributorEvent } from '../../lib/distributor-repository.js';
 import {
   getSourceByChatId,
   getSourceMessage,
@@ -9,7 +11,7 @@ import {
   syncSourceIndexedMessageCount,
   upsertSourceMessage
 } from '../../lib/repository.js';
-import { insert, patch } from '../../lib/supabase.js';
+import { insert, patch, select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 
 async function enqueue(source, normalized, { edited = false, hasInternalLinks = false } = {}) {
@@ -27,6 +29,21 @@ async function enqueue(source, normalized, { edited = false, hasInternalLinks = 
       await insert(TABLES.cloneJobItems, { job_id: job.id, source_message_id: normalized.source_message_id, source_message_ids: [normalized.source_message_id], phase: 'rewrite', status: 'queued' }, { returning: false });
     }
   }
+}
+
+async function recordDistributorV2Event(update, source, normalized, hasInternalLinks) {
+  // Fail closed in Production: the bridge is opt-in and remains disabled until
+  // Distributor V2 migrations/rollout are explicitly approved. The isolated E2E
+  // harness enables this flag only against its local Postgres/PostgREST stack.
+  if (String(process.env.DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED || '').toLowerCase() !== 'true') return null;
+  const settings = await select(TABLES.settings, 'select=distributor_v2_enabled&singleton=eq.true&limit=1');
+  if (settings?.[0]?.distributor_v2_enabled !== true) return null;
+  const event = distributorEventFromUpdate(update, source, { ...normalized, has_internal_links: hasInternalLinks });
+  return recordDistributorEvent({
+    ...event,
+    sourceId: source.id,
+    sourceFingerprint: null
+  });
 }
 
 function selfForwardOrigin(message) {
@@ -101,6 +118,12 @@ export default async function handler(req, res) {
   });
   await syncSourceIndexedMessageCount(source.id);
   await recordInternalLinks(source.id, saved.id, links);
+  await recordDistributorV2Event(update, source, normalized, links.length > 0);
   await enqueue(source, normalized, { edited: Boolean(update.edited_channel_post), hasInternalLinks: links.length > 0 });
-  json(res, 200, { ok: true, indexed: true, mirrored: Boolean(source.active) });
+  json(res, 200, {
+    ok: true,
+    indexed: true,
+    mirrored: Boolean(source.active),
+    distributor_v2_event_bridge: String(process.env.DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED || '').toLowerCase() === 'true'
+  });
 }

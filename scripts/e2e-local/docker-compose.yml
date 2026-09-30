@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:17
+    container_name: tgcloner-e2e-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    container_name: tgcloner-e2e-rest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:local-e2e@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: service_role
+    ports:
+      - "54321:3000"
