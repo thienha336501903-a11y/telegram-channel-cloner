@@ -23,5 +23,17 @@ Reader import is displayed separately from destination cloning. Telegram Bot API
 copy does not expose a byte-level media transfer percentage.
 
 CI executes the migration and integration assertions for READY, open manifest,
-retry, blocker, source lag, and album grouping. The isolated synthetic 1→1 and
-1→3 pilot must pass before any Production queue or allocation work is enabled.
+retry, blocker, source lag, and album grouping. A separate PostgreSQL database
+in the same CI job runs `tests/distributor-synthetic-pilot.integration.sql` for
+1→1 and concurrent 1→3. It covers album grouping, a pinned TOC, video, a late
+source post, a known 429 retry, ambiguous-copy reconciliation, and the final
+3/3 READY ledger. It uses synthetic message IDs and simulated Telegram results;
+it sends nothing to Telegram and needs no Supabase project or paid branch.
+
+This database pilot does not prove actual Bot API copy, media fidelity, link
+rewriting, pin state, or webhook delivery. The next gate is a real 1→1 then 1→3
+pilot on disposable test channels with the bot as admin and isolated test data.
+Only after both gates pass should V2 migrations/queue be considered for the
+System B Production database, followed by a separate allocation review. Keep
+the existing Production domain, webhook, Original, learners, and System A
+untouched during these tests.
