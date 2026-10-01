@@ -28,6 +28,15 @@ function Invoke-PsqlFile([string]$Path) {
   if ($LASTEXITCODE -ne 0) { throw "psql failed: $Path" }
 }
 
+function Get-FreeLoopbackPort {
+  $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+  try {
+    $listener.Start()
+    return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+  }
+  finally { $listener.Stop() }
+}
+
 function Wait-PostgrestSchema {
   # Migrations 010-016 alter tables/functions that PostgREST caches. Force a
   # schema refresh after startup, then prove the V2 settings column is queryable
@@ -38,12 +47,13 @@ function Wait-PostgrestSchema {
   # A restart is cheap in the disposable local harness and guarantees a fresh
   # cache even if the LISTEN subscription was not ready when NOTIFY was sent.
   docker restart tgcloner-e2e-rest | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Local PostgREST container did not restart.' }
 
   $lastError = ''
   for ($i=0; $i -lt 30; $i++) {
     try {
       $probe = Invoke-WebRequest -UseBasicParsing `
-        -Uri 'http://127.0.0.1:54321/tgcloner_settings?select=distributor_v2_enabled&limit=1' `
+        -Uri "http://127.0.0.1:$($env:E2E_POSTGREST_PORT)/tgcloner_settings?select=distributor_v2_enabled&limit=1" `
         -Headers @{ apikey = $env:SUPABASE_SECRET_KEY } `
         -TimeoutSec 2
       if ($probe.StatusCode -eq 200) {
@@ -85,7 +95,9 @@ Push-Location $RepoRoot
 $server = $null
 try {
   docker compose -f $Compose down -v --remove-orphans | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
   docker compose -f $Compose up -d db | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Local E2E PostgreSQL container did not start.' }
   for ($i=0; $i -lt 40; $i++) {
     docker exec tgcloner-e2e-db pg_isready -U postgres -d postgres *> $null
     if ($LASTEXITCODE -eq 0) { break }
@@ -101,7 +113,10 @@ try {
     Invoke-PsqlFile $file.FullName
   }
   Invoke-PsqlFile (Join-Path $PSScriptRoot 'permissions.sql')
+  $env:E2E_POSTGREST_PORT = [string](Get-FreeLoopbackPort)
+  Write-Host "E2E_POSTGREST_PORT $env:E2E_POSTGREST_PORT"
   docker compose -f $Compose up -d postgrest | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Local PostgREST container did not start on 127.0.0.1:$($env:E2E_POSTGREST_PORT). See the Docker error above." }
   Wait-PostgrestSchema
 
   $server = Start-Process node -ArgumentList @('scripts/e2e-local/server.mjs') -WorkingDirectory $RepoRoot -NoNewWindow -PassThru

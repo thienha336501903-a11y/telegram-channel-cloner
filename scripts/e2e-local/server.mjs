@@ -7,7 +7,8 @@ import webhook from '../../api/telegram/webhook.js';
 import { createPostgrestProxy } from './postgrest-proxy.mjs';
 
 const port = Number(process.env.E2E_LOCAL_PORT || 8787);
-const proxyPostgrest = createPostgrestProxy('http://127.0.0.1:54321', process.env.SUPABASE_SECRET_KEY);
+const postgrestPort = Number(process.env.E2E_POSTGREST_PORT || 55433);
+const proxyPostgrest = createPostgrestProxy(`http://127.0.0.1:${postgrestPort}`, process.env.SUPABASE_SECRET_KEY);
 const routes = new Map([
   ['/api/reader/register-source', registerSource],
   ['/api/reader/ingest', ingest],

@@ -26,6 +26,7 @@ A real 429 is **not** forced. CI already covers known 429 retry semantics and Te
 - local-only grants required by PostgREST.
 
 The local server maps the Supabase `/rest/v1/` URL to PostgREST's root routes and checks both paths before using Telegram. Docker publishes the database ports only on `127.0.0.1`. Each run creates a new local REST key, which the server requires even when a temporary test webhook tunnel is open.
+The harness selects a free loopback port for PostgREST and prints `E2E_POSTGREST_PORT`, avoiding collisions with another service on `54321`. Docker startup failures stop the run before the Telegram smoke step.
 
 The script sets `TGCLONER_READER_NO_SOURCE_MUTATION=true`. If Reader media metadata is not sufficient, ingestion fails instead of using the legacy self-forward/delete hydration path. The V2 webhook bridge is also opt-in through `DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED=true`; Production remains unchanged unless a later rollout explicitly enables it after migrations/review.
 
