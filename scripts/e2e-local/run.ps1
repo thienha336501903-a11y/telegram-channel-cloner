@@ -31,7 +31,7 @@ function Invoke-PsqlFile([string]$Path) {
 function Wait-PostgrestSchema {
   # Migrations 010-016 alter tables/functions that PostgREST caches. Force a
   # schema refresh after startup, then prove the V2 settings column is queryable
-  # before starting any Telegram side effects.
+  # directly at PostgREST's root path before starting any Telegram side effects.
   docker exec tgcloner-e2e-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "NOTIFY pgrst, 'reload schema';" *> $null
   if ($LASTEXITCODE -ne 0) { throw 'Could not request PostgREST schema reload.' }
 
@@ -43,7 +43,7 @@ function Wait-PostgrestSchema {
   for ($i=0; $i -lt 30; $i++) {
     try {
       $probe = Invoke-WebRequest -UseBasicParsing `
-        -Uri "$env:SUPABASE_URL/rest/v1/tgcloner_settings?select=distributor_v2_enabled&limit=1" `
+        -Uri 'http://127.0.0.1:54321/tgcloner_settings?select=distributor_v2_enabled&limit=1' `
         -Headers @{ apikey = $env:SUPABASE_SECRET_KEY } `
         -TimeoutSec 2
       if ($probe.StatusCode -eq 200) {
@@ -70,8 +70,8 @@ if (-not $SmokeOnly) {
 }
 $env:READER_INGEST_SECRET = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
 $env:TELEGRAM_WEBHOOK_SECRET = [guid]::NewGuid().ToString('N')
-$env:SUPABASE_URL = 'http://127.0.0.1:54321'
-$env:SUPABASE_SECRET_KEY = 'sb_secret_e2e'
+$env:SUPABASE_URL = 'http://127.0.0.1:8787'
+$env:SUPABASE_SECRET_KEY = 'sb_secret_' + [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
 $env:TGCLONER_READER_NO_SOURCE_MUTATION = 'true'
 $env:DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED = 'true'
 $env:E2E_SOURCE_CHAT_ID = $Source
@@ -107,6 +107,17 @@ try {
   $server = Start-Process node -ArgumentList @('scripts/e2e-local/server.mjs') -WorkingDirectory $RepoRoot -NoNewWindow -PassThru
   Start-Sleep -Seconds 1
   if ($server.HasExited) { throw 'Local E2E HTTP server exited during startup.' }
+  # The local server forwards the normal Supabase /rest/v1 path to PostgREST.
+  # Prove this route works before the smoke script contacts the TEST bot.
+  try {
+    $proxyProbe = Invoke-WebRequest -UseBasicParsing `
+      -Uri "$env:SUPABASE_URL/rest/v1/tgcloner_settings?select=distributor_v2_enabled&limit=1" `
+      -Headers @{ apikey = $env:SUPABASE_SECRET_KEY } `
+      -TimeoutSec 5
+    if ($proxyProbe.StatusCode -ne 200) { throw "HTTP $($proxyProbe.StatusCode)" }
+    Write-Host 'LOCAL_SUPABASE_REST_PROXY_READY'
+  }
+  catch { throw "Local Supabase REST proxy failed: $($_.Exception.Message)" }
 
   if ($SmokeOnly) {
     Write-Host 'Smoke mode: Reader API credentials are not used. The TEST bot will capture one new plain-text source post through getUpdates.'

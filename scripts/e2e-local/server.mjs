@@ -4,8 +4,10 @@ import registerSource from '../../api/reader/register-source.js';
 import ingest from '../../api/reader/ingest.js';
 import complete from '../../api/reader/complete.js';
 import webhook from '../../api/telegram/webhook.js';
+import { createPostgrestProxy } from './postgrest-proxy.mjs';
 
 const port = Number(process.env.E2E_LOCAL_PORT || 8787);
+const proxyPostgrest = createPostgrestProxy('http://127.0.0.1:54321', process.env.SUPABASE_SECRET_KEY);
 const routes = new Map([
   ['/api/reader/register-source', registerSource],
   ['/api/reader/ingest', ingest],
@@ -15,6 +17,10 @@ const routes = new Map([
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${port}`}`);
+  if (url.pathname.startsWith('/rest/v1/')) {
+    proxyPostgrest(req, res);
+    return;
+  }
   const handler = routes.get(url.pathname);
   if (!handler) {
     res.statusCode = 404;
