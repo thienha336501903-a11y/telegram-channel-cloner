@@ -27,7 +27,27 @@ A real 429 is **not** forced. CI already covers known 429 retry semantics and Te
 
 The script sets `TGCLONER_READER_NO_SOURCE_MUTATION=true`. If Reader media metadata is not sufficient, ingestion fails instead of using the legacy self-forward/delete hydration path. The V2 webhook bridge is also opt-in through `DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED=true`; Production remains unchanged unless a later rollout explicitly enables it after migrations/review.
 
-## Telegram fixture
+## Quick 1→1 smoke gate (no Reader API credentials)
+
+For the first real Telegram smoke run, use `-SmokeOnly`. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.
+
+The smoke script verifies that the supplied token belongs to `@yeubep_distributor_test_bot`. It then clears stale pending updates for that dedicated TEST bot, registers the disposable source against the isolated local DB, and waits for one new plain-text `channel_post` from the source through Bot API `getUpdates`. The captured real Telegram update is sent through the same local webhook handler/V2 event bridge, then the distributor performs an actual Telegram copy to destination A and drives the run to `READY_FOR_NEW`.
+
+From PowerShell at repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
+  -Mode 1to1 `
+  -SmokeOnly `
+  -Source '-100SOURCE' `
+  -Destinations '-100DEST_A'
+```
+
+Only the **TEST bot token** is prompted. When the harness prints `E2E_POST_SMOKE_MESSAGE_NOW`, post exactly one new plain-text message in the source test channel. The automated smoke gate ends with `E2E_SMOKE_DB_AND_BOT_WORKER_PASS` and `E2E_SMOKE_AUTOMATED_GATE_PASS mode=1to1`. Manually open destination A and confirm the new text appears there.
+
+A smoke PASS proves the real TEST bot → Telegram update → local V2 event/index → Bot API copy → mapping/READY path for a new text post. It does **not** prove history import, albums, video media, hidden/literal link rewriting, pin parity, or Telethon read-only fidelity. Those remain the full E2E gate below.
+
+## Telegram fixture for full E2E
 
 Use one private source plus four private destinations:
 
@@ -44,7 +64,7 @@ The source should contain at least:
 
 Use a dedicated test bot. Add it as admin to the source and all destinations with the permissions needed to post/edit/pin. The Reader Telegram user must be a member of all test channels. Do not use course content or learners.
 
-## 1→1
+## Full 1→1
 
 From PowerShell at repository root:
 
@@ -55,9 +75,9 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
   -Destinations '-100DEST_A'
 ```
 
-The script prompts locally for the **test bot token** and, if not already present in environment variables, the Reader API ID/hash. Do not paste bot tokens, OTPs, session strings or API hash into ChatGPT.
+The full gate prompts locally for the **test bot token** and, if not already present in environment variables, the Reader API ID/hash. Do not paste bot tokens, OTPs, session strings or API hash into ChatGPT.
 
-The harness now keeps the generated local DB credentials and Reader variables in the same process and automatically runs `verify_telegram.py` immediately after the DB/Bot worker gate. Do not launch a second verifier command from a new PowerShell process.
+The harness keeps the generated local DB credentials and Reader variables in the same process and automatically runs `verify_telegram.py` immediately after the DB/Bot worker gate. Do not launch a second verifier command from a new PowerShell process.
 
 The automated gate is PASS only after the output contains both the DB/Bot worker success marker and `E2E_TELEGRAM_READONLY_VERIFICATION_PASS`, followed by `E2E_AUTOMATED_GATE_PASS mode=1to1`. A manual Telegram-app check is still required: the short video must play and the rewritten TOC links must open inside destination A.
 

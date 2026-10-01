@@ -16,9 +16,11 @@ const sourceChatId = String(process.env.E2E_SOURCE_CHAT_ID || '').trim();
 const destinationChatIds = String(process.env.E2E_DESTINATION_CHAT_IDS || '')
   .split(',').map((value) => value.trim()).filter(Boolean);
 const waitForLatePost = String(process.env.E2E_WAIT_FOR_LATE_POST || '').toLowerCase() === 'true';
+const smokeOnly = String(process.env.E2E_SMOKE_ONLY || '').toLowerCase() === 'true';
 
 if (!sourceChatId) throw new Error('E2E_SOURCE_CHAT_ID is required');
 if (![1, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1 or 3 chat ids');
+if (smokeOnly && destinationChatIds.length !== 1) throw new Error('E2E smoke mode supports exactly one destination');
 
 async function one(table, query) {
   const rows = await select(table, query);
@@ -79,27 +81,34 @@ async function driveToReady(runIds) {
 }
 
 const source = await one(TABLES.sources, `select=*&chat_id=eq.${encodeURIComponent(sourceChatId)}&limit=1`);
-if (!source) throw new Error('Source not found in isolated DB. Run Reader import first.');
+if (!source) throw new Error(smokeOnly ? 'Source not found in isolated DB. Smoke source capture must run first.' : 'Source not found in isolated DB. Run Reader import first.');
 const messages = await select(TABLES.sourceMessages, `select=*&source_id=eq.${encodeURIComponent(source.id)}&order=source_message_id.asc`);
 if (!messages?.length) throw new Error('Source manifest is empty');
 
-const sourceShape = { private_link_id: source.private_link_id, username: source.username };
-const hiddenInternal = messages.some((message) => {
-  const entities = [...(message.text_entities || []), ...(message.caption_entities || [])];
-  return entities.some((entity) => entity?.type === 'text_link') && linksForNormalizedMessage(message, sourceShape).length > 0;
-});
-const hasVideo = messages.some((message) => message.message_type === 'video');
-const albumGroups = new Map();
-for (const message of messages) {
-  if (!message.media_group_id) continue;
-  albumGroups.set(message.media_group_id, (albumGroups.get(message.media_group_id) || 0) + 1);
+if (!smokeOnly) {
+  const sourceShape = { private_link_id: source.private_link_id, username: source.username };
+  const hiddenInternal = messages.some((message) => {
+    const entities = [...(message.text_entities || []), ...(message.caption_entities || [])];
+    return entities.some((entity) => entity?.type === 'text_link') && linksForNormalizedMessage(message, sourceShape).length > 0;
+  });
+  const hasVideo = messages.some((message) => message.message_type === 'video');
+  const albumGroups = new Map();
+  for (const message of messages) {
+    if (!message.media_group_id) continue;
+    albumGroups.set(message.media_group_id, (albumGroups.get(message.media_group_id) || 0) + 1);
+  }
+  const hasAlbum = [...albumGroups.values()].some((count) => count >= 2);
+  const pinned = messages.filter((message) => message.is_pinned);
+  if (!hiddenInternal) throw new Error('Fixture missing indexed hidden internal text_link');
+  if (!hasVideo) throw new Error('Fixture missing video');
+  if (!hasAlbum) throw new Error('Fixture missing 2+ member album');
+  if (pinned.length !== 1) throw new Error(`Fixture must have exactly one pinned message; found ${pinned.length}`);
+} else {
+  if (messages.some((message) => message.message_type !== 'text')) {
+    throw new Error('Smoke source manifest must contain plain text only');
+  }
+  console.log(`E2E_SMOKE_MANIFEST source=${source.chat_id} messages=${messages.length}`);
 }
-const hasAlbum = [...albumGroups.values()].some((count) => count >= 2);
-const pinned = messages.filter((message) => message.is_pinned);
-if (!hiddenInternal) throw new Error('Fixture missing indexed hidden internal text_link');
-if (!hasVideo) throw new Error('Fixture missing video');
-if (!hasAlbum) throw new Error('Fixture missing 2+ member album');
-if (pinned.length !== 1) throw new Error(`Fixture must have exactly one pinned message; found ${pinned.length}`);
 
 await patch(TABLES.settings, 'singleton=eq.true', { distributor_v2_enabled: true, scheduler_enabled: false }, { returning: false });
 
@@ -155,4 +164,5 @@ const finalRuns = await driveToReady(runIds);
 const progress = await getDistributorProgress({ limit: 50 });
 console.log('E2E_READY', JSON.stringify(finalRuns.map((run) => ({ id: run.id, destination_id: run.destination_id, phase: run.phase, verified_at: run.last_verified_at }))));
 console.log('E2E_PROGRESS', JSON.stringify(progress));
-console.log('E2E_DB_AND_BOT_WORKER_PASS');
+if (smokeOnly) console.log('E2E_SMOKE_DB_AND_BOT_WORKER_PASS');
+else console.log('E2E_DB_AND_BOT_WORKER_PASS');
