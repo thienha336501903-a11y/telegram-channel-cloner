@@ -18,7 +18,7 @@ async function listen(handler) {
 }
 
 test('local E2E proxy maps Supabase REST reads and writes to root PostgREST routes', async () => {
-  const apiKey = 'sb_secret_run_specific_test_key';
+  const apiKey = 'local-test-key';
   const received = [];
   const upstream = await listen(async (req, res) => {
     let body = '';
