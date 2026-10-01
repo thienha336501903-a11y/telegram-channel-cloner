@@ -82,7 +82,12 @@ try {
   node scripts/e2e-local/run-distributor.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
-  Write-Host 'DB + Bot API worker gate finished. Run verify_telegram.py next for read-only Telegram content verification.'
+  Write-Host 'DB + Bot API worker gate finished. Running read-only Telegram verifier in the same process environment.'
+  python scripts/e2e-local/verify_telegram.py
+  if ($LASTEXITCODE -ne 0) { throw 'Telegram read-only verification failed.' }
+
+  Write-Host "E2E_AUTOMATED_GATE_PASS mode=$Mode"
+  Write-Host 'Manual gate remains: play the short video and open the rewritten TOC links in the Telegram app.'
 }
 finally {
   if ($PublicUrl -and $env:TELEGRAM_BOT_TOKEN) {

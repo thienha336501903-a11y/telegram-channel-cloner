@@ -57,13 +57,9 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
 
 The script prompts locally for the **test bot token** and, if not already present in environment variables, the Reader API ID/hash. Do not paste bot tokens, OTPs, session strings or API hash into ChatGPT.
 
-After `E2E_DB_AND_BOT_WORKER_PASS`, run the read-only verifier in the same PowerShell session/environment:
+The harness now keeps the generated local DB credentials and Reader variables in the same process and automatically runs `verify_telegram.py` immediately after the DB/Bot worker gate. Do not launch a second verifier command from a new PowerShell process.
 
-```powershell
-python scripts/e2e-local/verify_telegram.py
-```
-
-The gate is PASS only after both `E2E_DB_AND_BOT_WORKER_PASS` and `E2E_TELEGRAM_READONLY_VERIFICATION_PASS` are present, plus a manual Telegram-app check that the short video plays and the TOC links open inside destination A.
+The automated gate is PASS only after the output contains both the DB/Bot worker success marker and `E2E_TELEGRAM_READONLY_VERIFICATION_PASS`, followed by `E2E_AUTOMATED_GATE_PASS mode=1to1`. A manual Telegram-app check is still required: the short video must play and the rewritten TOC links must open inside destination A.
 
 ## 1→3 catch-up
 
@@ -89,13 +85,7 @@ The harness sets the webhook only on the **test bot**. When it prints:
 
 post exactly one new text message into the source test channel. The run waits for both the indexed source row and a durable `bot_webhook` event before continuing. The webhook is deleted from the test bot in the script's `finally` block.
 
-Then run:
-
-```powershell
-python scripts/e2e-local/verify_telegram.py
-```
-
-Pass requires all three runs to reach `READY_FOR_NEW`, Progress Center ledger to show no unresolved lag/block/retry, 3/3 Telegram destinations to pass read-only verification, and manual app checks of video/TOC on the destinations.
+The same `run.ps1` process automatically performs the read-only Telegram verification before cleanup. Pass requires all three runs to reach `READY_FOR_NEW`, Progress Center ledger to show no unresolved lag/block/retry, 3/3 Telegram destinations to pass read-only verification, `E2E_AUTOMATED_GATE_PASS mode=1to3`, and manual app checks of video/TOC on the destinations.
 
 ## What this does not authorize
 
