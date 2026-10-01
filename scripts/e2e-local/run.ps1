@@ -28,6 +28,37 @@ function Invoke-PsqlFile([string]$Path) {
   if ($LASTEXITCODE -ne 0) { throw "psql failed: $Path" }
 }
 
+function Wait-PostgrestSchema {
+  # Migrations 010-016 alter tables/functions that PostgREST caches. Force a
+  # schema refresh after startup, then prove the V2 settings column is queryable
+  # before starting any Telegram side effects.
+  docker exec tgcloner-e2e-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "NOTIFY pgrst, 'reload schema';" *> $null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not request PostgREST schema reload.' }
+
+  # A restart is cheap in the disposable local harness and guarantees a fresh
+  # cache even if the LISTEN subscription was not ready when NOTIFY was sent.
+  docker restart tgcloner-e2e-rest | Out-Null
+
+  $lastError = ''
+  for ($i=0; $i -lt 30; $i++) {
+    try {
+      $probe = Invoke-WebRequest -UseBasicParsing `
+        -Uri "$env:SUPABASE_URL/rest/v1/tgcloner_settings?select=distributor_v2_enabled&limit=1" `
+        -Headers @{ apikey = $env:SUPABASE_SECRET_KEY } `
+        -TimeoutSec 2
+      if ($probe.StatusCode -eq 200) {
+        Write-Host 'POSTGREST_V2_SCHEMA_READY'
+        return
+      }
+    }
+    catch {
+      $lastError = $_.Exception.Message
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "PostgREST V2 schema cache did not become ready. Last error: $lastError"
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop/docker CLI is required.' }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
 if (-not $SmokeOnly -and -not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required for full Telegram E2E.' }
@@ -71,7 +102,7 @@ try {
   }
   Invoke-PsqlFile (Join-Path $PSScriptRoot 'permissions.sql')
   docker compose -f $Compose up -d postgrest | Out-Null
-  Start-Sleep -Seconds 2
+  Wait-PostgrestSchema
 
   $server = Start-Process node -ArgumentList @('scripts/e2e-local/server.mjs') -WorkingDirectory $RepoRoot -NoNewWindow -PassThru
   Start-Sleep -Seconds 1
