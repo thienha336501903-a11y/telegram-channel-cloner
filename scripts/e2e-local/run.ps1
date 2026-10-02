@@ -38,6 +38,12 @@ if ($InspectFullCourseOnly -and ($ResumeCourseFull -or $InspectCourseOnly -or $E
 if ($ResumeCourseFull -and ($InspectCourseOnly -or $ExistingPostOnly -or $SmokeOnly -or $CoursePrefix -or $RepairKnownTestCopies -or $DestinationConfirmedEmpty -or $Mode -ne '1to1' -or $PublicUrl)) { throw 'Full course continuation cannot be combined with reset, smoke, prefix or webhook modes.' }
 if (($ResumeCourseFull -or $InspectFullCourseOnly) -and ($Source.Trim() -ne '-1003535777660' -or $Destinations.Count -ne 1 -or $Destinations[0].Trim() -ne '-1004492904064')) { throw 'Full course actions require the documented TEST source and disposable destination.' }
 if ($ResumeCourseFull -and (-not $DestinationConfirmedDisposable -or $ExpectedHistoryCount -le 5 -or $ExpectedHighWatermark -le 7 -or $ExpectedInventorySha256 -notmatch '^[0-9a-fA-F]{64}$')) { throw 'Resume requires a learner-free TEST destination and the exact count, high watermark and SHA256 from full inventory.' }
+if ($ResumeCourseFull) {
+  $indexLedger = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'YeuNauAnReader\E2EBackups\course-index--1004492904064.json'
+  if (Test-Path -LiteralPath $indexLedger) {
+    throw 'The TEST destination has an index publish ledger. Do not rerun the old copy-only worker: its source-pin parity step could unpin the index. Reconcile the index and use an index-aware continuation.'
+  }
+}
 if (-not $ResumeCourseFull -and -not $InspectFullCourseOnly -and ($ExpectedHistoryCount -ne 0 -or $ExpectedHighWatermark -ne 0 -or $ExpectedInventorySha256)) { throw 'Expected full inventory fields require a full course mode.' }
 if ($CoursePrefix -and -not $ExistingPostOnly) { throw 'CoursePrefix requires -ExistingPostOnly.' }
 if (($RepairKnownTestCopies -or $DestinationConfirmedEmpty) -and -not $CoursePrefix) { throw 'The repair/empty-destination flags require -CoursePrefix.' }

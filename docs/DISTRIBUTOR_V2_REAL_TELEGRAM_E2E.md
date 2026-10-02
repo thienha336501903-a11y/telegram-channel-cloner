@@ -88,6 +88,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\run.ps1 
 
 `E2E_FULL_COURSE_COPY_AUTOMATED_PASS` means the local manifest and TEST Bot mappings cover the inventoried snapshot, and indexed internal links were processed. Open the TEST destination and check chronological order, albums, videos, appendix and rewritten links manually. This copy-only gate does not set a webhook, pin messages, switch on live sync, mark a run READY, change Production or touch the source channel. The Reader account still needs destination membership for independent Telethon read-only verification.
 
+### Generate the TEST channel's course index and appendix navigation
+
+After the owner has checked all 53 copied posts in Telegram, use the **same Windows computer and retained Docker DB**. This is an isolated TEST pilot for source `-1003535777660`, destination `-1004492904064`, run `023c3197-fe64-4ddf-9229-2632a2fad4a9`. It never resets Docker, recopies lessons, edits the source, uses a Production bot or writes to Supabase B Production.
+
+Preview the index first. The script requires exactly 53 copied mappings through H=56, the five verified prefix mappings, a closed manifest, no unsafe copy work, and source/destination identity. It groups each intact album into one index entry and derives a short lesson title from source text/caption. Every link points to the mapped message **in the TEST destination**. It drops literal source links from generated titles. The preview needs no bot token:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\publish-course-index.ps1
+```
+
+Publish once after reading the preview:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\publish-course-index.ps1 -Publish
+```
+
+The secure prompt is only for `@yeubep_distributor_test_bot`. The script verifies the bot and destination, sends **one** index message, pins it, rereads the pinned message and checks its destination links. A local ledger at `%LOCALAPPDATA%\YeuNauAnReader\E2EBackups\course-index--1004492904064.json` stores the message ID and content hash, so an ordinary rerun verifies/edits the existing index rather than posting another. If the Bot API send outcome is uncertain, it stops with an armed ledger and **must not be blindly retried**; inspect the TEST channel and reconcile first. A known Telegram 429 may be retried after `retry_after`. Keep the ledger and Docker DB.
+
+The current course inventory has no reliable literal “phụ lục” marker. The default `📚 MỤC LỤC & PHỤ LỤC KHÓA HỌC` includes every copied post and album in source order, including the appendix posts the owner reviewed, without guessing where the appendix section begins. Once its first **source** message ID is known, preview and publish with the same boundary to add a `PHỤ LỤC` heading (the boundary must be the first post of an album, if applicable):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\publish-course-index.ps1 -AppendixStartSourceId <source_message_id>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\publish-course-index.ps1 -Publish -AppendixStartSourceId <source_message_id>
+```
+
+After publish, open the reported index link in the Telegram app and click the first, middle, last, album and appendix entries. The legacy copy-only continuation must not be rerun once the index ledger exists: its existing pin-parity path expects no source pin and could unpin this destination-owned index. This pilot does **not** establish READY/live sync, 1→3, or general automatic index maintenance for later clones. Those need an index-aware pin policy and separate E2E gates before rollout.
+
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
 Use `-SmokeOnly` **only with a disposable source that has no learners**. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.
