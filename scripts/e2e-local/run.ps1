@@ -8,6 +8,11 @@ param(
   [ValidateRange(1,5)][int]$ExistingPostsLimit = 1,
   [switch]$CoursePrefix,
   [switch]$InspectCourseOnly,
+  [switch]$InspectFullCourseOnly,
+  [switch]$ResumeCourseFull,
+  [int]$ExpectedHistoryCount = 0,
+  [long]$ExpectedHighWatermark = 0,
+  [string]$ExpectedInventorySha256 = '',
   [switch]$RepairKnownTestCopies,
   [switch]$DestinationConfirmedEmpty,
   [long]$SkipSourceMessageId = 0,
@@ -29,6 +34,11 @@ if ($ExistingPostOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingP
 if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
 if ($ExistingPostOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingPostOnly copies old posts to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
 if ($InspectCourseOnly -and ($Mode -ne '1to1' -or $ExistingPostOnly -or $SmokeOnly -or $CoursePrefix -or $SkipSourceMessageId -ne 0 -or $ExistingPostsLimit -ne 1)) { throw 'InspectCourseOnly reads source/destination history in 1to1 mode without copy switches.' }
+if ($InspectFullCourseOnly -and ($ResumeCourseFull -or $InspectCourseOnly -or $ExistingPostOnly -or $SmokeOnly -or $CoursePrefix -or $Mode -ne '1to1' -or $PublicUrl)) { throw 'Full inventory is read-only and supports only Mode 1to1.' }
+if ($ResumeCourseFull -and ($InspectCourseOnly -or $ExistingPostOnly -or $SmokeOnly -or $CoursePrefix -or $RepairKnownTestCopies -or $DestinationConfirmedEmpty -or $Mode -ne '1to1' -or $PublicUrl)) { throw 'Full course continuation cannot be combined with reset, smoke, prefix or webhook modes.' }
+if (($ResumeCourseFull -or $InspectFullCourseOnly) -and ($Source.Trim() -ne '-1003535777660' -or $Destinations.Count -ne 1 -or $Destinations[0].Trim() -ne '-1004492904064')) { throw 'Full course actions require the documented TEST source and disposable destination.' }
+if ($ResumeCourseFull -and (-not $DestinationConfirmedDisposable -or $ExpectedHistoryCount -le 5 -or $ExpectedHighWatermark -le 7 -or $ExpectedInventorySha256 -notmatch '^[0-9a-fA-F]{64}$')) { throw 'Resume requires a learner-free TEST destination and the exact count, high watermark and SHA256 from full inventory.' }
+if (-not $ResumeCourseFull -and -not $InspectFullCourseOnly -and ($ExpectedHistoryCount -ne 0 -or $ExpectedHighWatermark -ne 0 -or $ExpectedInventorySha256)) { throw 'Expected full inventory fields require a full course mode.' }
 if ($CoursePrefix -and -not $ExistingPostOnly) { throw 'CoursePrefix requires -ExistingPostOnly.' }
 if (($RepairKnownTestCopies -or $DestinationConfirmedEmpty) -and -not $CoursePrefix) { throw 'The repair/empty-destination flags require -CoursePrefix.' }
 if ($RepairKnownTestCopies -and $DestinationConfirmedEmpty) { throw 'Choose exactly one destination preparation mode.' }
@@ -153,8 +163,8 @@ function Wait-PostgrestSchema {
   throw "PostgREST V2 schema cache did not become ready. Last error: $lastError"
 }
 
-if (-not $InspectCourseOnly -and -not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop/docker CLI is required.' }
-if (-not $InspectCourseOnly -and -not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
+if (-not $InspectCourseOnly -and -not $InspectFullCourseOnly -and -not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop/docker CLI is required.' }
+if (-not $InspectCourseOnly -and -not $InspectFullCourseOnly -and -not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
 if (-not $SmokeOnly -and -not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required for full Telegram E2E.' }
 
 Remove-Item Env:TELEGRAM_SESSION_STRING -ErrorAction SilentlyContinue
@@ -186,6 +196,30 @@ if ($InspectCourseOnly) {
   finally { Pop-Location }
   return
 }
+if ($InspectFullCourseOnly -or $ResumeCourseFull) {
+  Push-Location $RepoRoot
+  try {
+    $inventoryArgs = @('scripts/e2e-local/inventory-course.py', '--source', $Source)
+    if ($ResumeCourseFull) {
+      $inventoryArgs += @('--expected-count', [string]$ExpectedHistoryCount, '--expected-high-watermark', [string]$ExpectedHighWatermark, '--expected-sha256', $ExpectedInventorySha256)
+    }
+    & python @inventoryArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Full course read-only preflight failed. Nothing was copied.' }
+  }
+  finally { Pop-Location }
+  if ($InspectFullCourseOnly) { return }
+  docker exec tgcloner-e2e-db pg_isready -U postgres -d postgres *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker start tgcloner-e2e-db *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'The five-post local DB container is missing. Never reset it or blindly recopy; restore or reconcile it first.' }
+    for ($i=0; $i -lt 40; $i++) {
+      docker exec tgcloner-e2e-db pg_isready -U postgres -d postgres *> $null
+      if ($LASTEXITCODE -eq 0) { break }
+      Start-Sleep -Milliseconds 500
+      if ($i -eq 39) { throw 'The retained five-post local DB did not become ready.' }
+    }
+  }
+}
 if ($CoursePrefix) {
   Push-Location $RepoRoot
   try {
@@ -205,9 +239,11 @@ $env:E2E_SOURCE_CHAT_ID = $Source
 $env:E2E_DESTINATION_CHAT_IDS = ($Destinations -join ',')
 $env:E2E_WAIT_FOR_LATE_POST = if ($Mode -eq '1to3') { 'true' } else { 'false' }
 $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
-$env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly) { 'true' } else { 'false' }
-$env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly) { 'true' } else { 'false' }
-$env:E2E_EXISTING_MAX_COPIES = if ($ExistingPostOnly) { [string]$ExistingPostsLimit } else { '0' }
+$env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly -or $ResumeCourseFull) { 'true' } else { 'false' }
+$env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly -or $ResumeCourseFull) { 'true' } else { 'false' }
+$env:E2E_EXISTING_MAX_COPIES = if ($ResumeCourseFull) { [string]$ExpectedHistoryCount } elseif ($ExistingPostOnly) { [string]$ExistingPostsLimit } else { '0' }
+$env:E2E_RESUME_COURSE_FULL = if ($ResumeCourseFull) { 'true' } else { 'false' }
+$env:E2E_EXPECTED_HIGH_WATERMARK = [string]$ExpectedHighWatermark
 $env:E2E_EXISTING_COURSE_PREFIX = if ($CoursePrefix) { 'true' } else { 'false' }
 $env:E2E_EXISTING_EXCLUDED_SOURCE_ID = [string]$SkipSourceMessageId
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
@@ -223,10 +259,22 @@ try {
     node scripts/e2e-local/repair-test-copies.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Known TEST copies were not all safely removed; local DB was preserved. Do not retry blindly.' }
   }
-  docker compose -f $Compose down -v --remove-orphans | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
-  docker compose -f $Compose up -d db | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Local E2E PostgreSQL container did not start.' }
+  if ($ResumeCourseFull) {
+    $backupDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'YeuNauAnReader\E2EBackups'
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $backupPath = Join-Path $backupDir ('before-full-course-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.dump')
+    docker exec tgcloner-e2e-db pg_dump -U postgres -d postgres -Fc -f /tmp/tgcloner-e2e-before-full.dump
+    if ($LASTEXITCODE -ne 0) { throw 'Could not back up the local E2E DB; no Telegram copy started.' }
+    docker cp tgcloner-e2e-db:/tmp/tgcloner-e2e-before-full.dump $backupPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupPath)) { throw 'Could not save the local DB checkpoint; no Telegram copy started.' }
+    Write-Host "E2E_LOCAL_DB_CHECKPOINT $backupPath"
+  }
+  else {
+    docker compose -f $Compose down -v --remove-orphans | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
+    docker compose -f $Compose up -d db | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Local E2E PostgreSQL container did not start.' }
+  }
   for ($i=0; $i -lt 40; $i++) {
     docker exec tgcloner-e2e-db pg_isready -U postgres -d postgres *> $null
     if ($LASTEXITCODE -eq 0) { break }
@@ -234,14 +282,16 @@ try {
     if ($i -eq 39) { throw 'Local PostgreSQL did not become ready.' }
   }
 
-  Invoke-PsqlFile (Join-Path $PSScriptRoot 'bootstrap.sql')
-  Invoke-PsqlFile (Join-Path $RepoRoot 'sql\002_shared_supabase_tgcloner_schema.sql')
-  foreach ($n in 10..16) {
-    $file = Get-ChildItem (Join-Path $RepoRoot 'sql') -Filter (('{0:D3}_*.sql' -f $n)) | Select-Object -First 1
-    if (-not $file) { throw "Missing migration $n" }
-    Invoke-PsqlFile $file.FullName
+  if (-not $ResumeCourseFull) {
+    Invoke-PsqlFile (Join-Path $PSScriptRoot 'bootstrap.sql')
+    Invoke-PsqlFile (Join-Path $RepoRoot 'sql\002_shared_supabase_tgcloner_schema.sql')
+    foreach ($n in 10..16) {
+      $file = Get-ChildItem (Join-Path $RepoRoot 'sql') -Filter (('{0:D3}_*.sql' -f $n)) | Select-Object -First 1
+      if (-not $file) { throw "Missing migration $n" }
+      Invoke-PsqlFile $file.FullName
+    }
+    Invoke-PsqlFile (Join-Path $PSScriptRoot 'permissions.sql')
   }
-  Invoke-PsqlFile (Join-Path $PSScriptRoot 'permissions.sql')
   $env:E2E_POSTGREST_PORT = [string](Get-FreeLoopbackPort)
   Write-Host "E2E_POSTGREST_PORT $env:E2E_POSTGREST_PORT"
   docker compose -f $Compose up -d postgrest | Out-Null
@@ -274,7 +324,11 @@ try {
       if ($LASTEXITCODE -ne 0) { throw 'Could not set TEST bot webhook.' }
     }
 
-    if ($ExistingPostOnly) {
+    if ($ResumeCourseFull) {
+      Write-Host "Reading $ExpectedHistoryCount existing posts into the retained local DB. The source channel is read-only; the TEST destination receives copies."
+      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --local-full-copy-only --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256
+    }
+    elseif ($ExistingPostOnly) {
       Write-Host "Reading at most $ExistingPostsLimit existing post(s) into the isolated local DB. No post, edit, pin or delete is made in the source channel."
       if ($CoursePrefix) {
         python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --course-prefix-limit $ExistingPostsLimit
@@ -288,12 +342,20 @@ try {
       python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader
     }
     if ($LASTEXITCODE -ne 0) { throw 'Reader import failed.' }
+    if ($ResumeCourseFull) {
+      python scripts/e2e-local/inventory-course.py --source $Source --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256
+      if ($LASTEXITCODE -ne 0) { throw 'Source changed during local import; no TEST destination copy was started.' }
+    }
   }
 
   node scripts/e2e-local/run-distributor.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
-  if ($ExistingPostOnly) {
+  if ($ResumeCourseFull) {
+    Write-Host "E2E_FULL_COURSE_LOCAL_GATE_PASS count=$ExpectedHistoryCount H=$ExpectedHighWatermark"
+    Write-Host 'Manual gate: check chronological order, videos, albums, links and appendix in the learner-free TEST destination.'
+  }
+  elseif ($ExistingPostOnly) {
     if (-not $CoursePrefix) {
       Write-Host 'E2E_EXISTING_POST_COPY_AUTOMATED_PASS mode=1to1'
     }

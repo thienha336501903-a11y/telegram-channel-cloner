@@ -211,16 +211,24 @@ async def main():
     p.add_argument("--latest-copyable-only", action="store_true", help="Local E2E only: index one old text or media post for Bot API copy")
     p.add_argument("--recent-safe-copy-limit", type=int, default=0, help="Local E2E only: index up to four standalone old posts without links")
     p.add_argument("--course-prefix-limit", type=int, default=0, help="Local E2E only: index the first one to five visible posts in source order, or fail before import")
+    p.add_argument("--local-full-copy-only", action="store_true", help="Local E2E only: import every visible post for Bot API copy; never hydrate source media")
+    p.add_argument("--expected-count", type=int, default=0)
+    p.add_argument("--expected-high-watermark", type=int, default=0)
+    p.add_argument("--expected-sha256", default="")
     p.add_argument("--exclude-source-id", type=int, default=0, help="Exclude the source post already copied in a prior local E2E run")
     # Keep each serverless request comfortably below the runtime deadline even
     # when a future/legacy message still requires Bot API hydration.
     p.add_argument("--batch-size", type=int, default=20)
     args = p.parse_args()
     if not args.api_id or not args.api_hash or not args.ingest_secret: p.error("api-id, api-hash and ingest-secret are required (flags or env vars)")
-    if sum(bool(value) for value in (args.latest_plain_text_only, args.latest_copyable_only, args.recent_safe_copy_limit, args.course_prefix_limit)) > 1:
+    if sum(bool(value) for value in (args.latest_plain_text_only, args.latest_copyable_only, args.recent_safe_copy_limit, args.course_prefix_limit, args.local_full_copy_only)) > 1:
         p.error("Choose only one existing-post selection mode")
     if (args.latest_copyable_only or args.recent_safe_copy_limit or args.course_prefix_limit) and args.cloner_url.rstrip("/") != "http://127.0.0.1:8787":
         p.error("Copy-only selection is restricted to the isolated local E2E server")
+    if args.local_full_copy_only and args.cloner_url.rstrip("/") != "http://127.0.0.1:8787":
+        p.error("Full copy-only import is restricted to the isolated local E2E server")
+    if args.local_full_copy_only and (args.expected_count < 5 or args.expected_high_watermark < 7 or len(args.expected_sha256) != 64):
+        p.error("Full local copy requires the exact count, high watermark and SHA256 from read-only inventory")
     if args.recent_safe_copy_limit and not 1 <= args.recent_safe_copy_limit <= 4:
         p.error("--recent-safe-copy-limit must be between 1 and 4")
     if args.exclude_source_id < 0 or (args.exclude_source_id and not args.recent_safe_copy_limit):
@@ -235,13 +243,21 @@ async def main():
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
         registered = post_json(args.cloner_url, "/api/reader/register-source", args.ingest_secret, {"chat_id": str(bot_chat_id), "title": title, "username": username, "private_link_id": private_link_id})
         source_id = registered["source"]["id"]
-        history_summary = None if one_post_only else await client.get_messages(entity, limit=0)
-        history_total = (args.recent_safe_copy_limit or args.course_prefix_limit or 1) if one_post_only else max(0, int(getattr(history_summary, "total", 0) or 0))
+        history_summary = None if one_post_only or args.local_full_copy_only else await client.get_messages(entity, limit=0)
+        history_total = (args.recent_safe_copy_limit or args.course_prefix_limit or 1) if one_post_only else args.expected_count if args.local_full_copy_only else max(0, int(getattr(history_summary, "total", 0) or 0))
         write_progress(args.progress_file, 0, history_total)
         role = "MASTER mirror" if registered.get("mirror_master") else "nguồn V4 không MASTER"
         print(f"Source: {title} ({source_id}) · {role}")
         pinned_ids = set()
-        if not one_post_only:
+        full_messages = None
+        if args.local_full_copy_only:
+            from course_full import scan_course
+            full_messages, pinned_ids, inventory = await scan_course(client, entity)
+            if (inventory["count"] != args.expected_count or inventory["high_watermark"] != args.expected_high_watermark
+                    or inventory["sha256"] != args.expected_sha256.lower()):
+                raise RuntimeError("Course inventory changed before import; no Telegram post was copied")
+            print(f"E2E_FULL_COURSE_IMPORT_PREFLIGHT count={inventory['count']} H={inventory['high_watermark']}")
+        elif not one_post_only:
             try:
                 from telethon.tl.types import InputMessagesFilterPinned
                 async for msg in client.iter_messages(entity, filter=InputMessagesFilterPinned): pinned_ids.add(int(msg.id))
@@ -256,25 +272,33 @@ async def main():
                 messages = recent_limited_copyable_posts(client, entity, limit=args.recent_safe_copy_limit, excluded_ids=excluded_ids)
             else:
                 messages = latest_copyable_post(client, entity) if args.latest_copyable_only else latest_plain_text(client, entity)
+        elif args.local_full_copy_only:
+            async def selected_full_messages():
+                for message in full_messages:
+                    yield message
+            messages = selected_full_messages()
         else:
             messages = client.iter_messages(entity, reverse=True)
 
         batch = []; count = 0
         async for msg in messages:
             if not getattr(msg, "id", None): continue
-            raw = msg.raw_text or ""; has_media = bool(msg.media)
+            raw = msg.raw_text or ""
+            # Telegram link previews are text posts, not editable photo/video
+            # captions. The full TEST copy must rewrite links with editMessageText.
+            has_media = bool(msg.media) and not (args.local_full_copy_only and msg.media.__class__.__name__ == "MessageMediaWebPage")
             # Telegram channel history includes service messages such as the
             # channel-created event. They have no user-visible text or media
             # and must not become empty V4 lesson items or inflate index counts.
             if not raw and not has_media: continue
             text = raw if not has_media else None; caption = raw if has_media and raw else None
             entities = [x for x in (entity_to_bot_api(e) for e in (msg.entities or [])) if x]
-            message_type = classify(msg)
+            message_type = "text" if args.local_full_copy_only and not has_media else classify(msg)
             # The isolated copy-only run needs an ID/type for Bot API copyMessage,
             # not a Reader media descriptor. Never ask ingestion to self-forward
             # a historical media post into the live source to hydrate metadata.
             local_copy_raw = {"e2e_copy_only": True}
-            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": message_type, "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": local_copy_raw if (args.latest_copyable_only or args.recent_safe_copy_limit or args.course_prefix_limit) else reader_raw_message(msg, message_type)}
+            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": message_type, "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": local_copy_raw if (args.latest_copyable_only or args.recent_safe_copy_limit or args.course_prefix_limit or args.local_full_copy_only) else reader_raw_message(msg, message_type)}
             if args.latest_plain_text_only:
                 print(f"E2E_EXISTING_TEXT_SELECTED source_message_id={item['source_message_id']}")
             elif args.latest_copyable_only:
@@ -291,6 +315,8 @@ async def main():
         if batch:
             post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
             write_progress(args.progress_file, count, count)
+        if args.local_full_copy_only and count != args.expected_count:
+            raise RuntimeError("Full course import count changed; no Telegram copy was started")
         post_json(args.cloner_url, "/api/reader/complete", args.ingest_secret, {"source_id": source_id, "message_count": count})
         print(f"Done. Indexed {count} messages. MASTER mirror role was not changed.")
 

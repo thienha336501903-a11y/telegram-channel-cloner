@@ -66,6 +66,28 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
 
 The source preflight runs **before** the bot token prompt and before the one-time cleanup or Docker reset. It stops on protected or unsupported posts, keeps whole albums together, and never skips a lesson to select a later one. If the fifth photo's link points beyond the selected prefix or is an unverified Telegram link, the plan stops after videos `2,3,4,5` (four Telegram posts, including the intact album). If its internal link points to one of the selected posts, the worker copies five and rewrites the photo caption link to its mapped destination post; normal external web links stay as written. The TEST bot then deletes only the five known out-of-order copies; a mismatch stops before deletion. The worker caps the replacement at five posts, serializes by ascending source ID and checks that destination IDs increase in that order. The source stays read-only. This local E2E does not mark the destination READY or sync future posts. If a failure happens after the bot was contacted, inspect destination and mappings before any retry.
 
+### Continue the confirmed five-post course into a full TEST snapshot
+
+After the verified prefix `2,3,4,5,7` → `14,15,16,17,18`, take a **read-only inventory** on the same Windows machine and Telegram Reader account. It reads all visible posts in oldest-to-newest order, including appendix posts; it prints only counts, IDs and a SHA-256 digest, never lesson text or secrets. The word `phụ lục` count is just a title/text hint, not a filter: all visible posts are included. The inventory refuses protected/unsupported posts, broken albums and source-channel links to missing posts.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\run.ps1 `
+  -Mode 1to1 -InspectFullCourseOnly `
+  -Source '-1003535777660' -Destinations '-1004492904064'
+```
+
+Only after checking the `E2E_FULL_COURSE_INVENTORY_READY` line, run the continuation, replacing the three placeholders with its exact `count`, `high_watermark` and `sha256` values. The five-post Docker DB **must still exist**. The script verifies the same source snapshot again, checks the dedicated TEST bot, saves a private `pg_dump` checkpoint under `%LOCALAPPDATA%\YeuNauAnReader\E2EBackups`, preserves the Docker DB, imports metadata in copy-only mode, and validates the exact five old mappings before creating a new manifest. It supersedes the local five-post run; the distributor recognizes complete old mappings and does not copy those messages again. Extra posts are serialized in source order. A failure or 429 stops without resetting the DB; do not run the older five-post command again. Run this same continuation after resolving the reported blocker or waiting for the retry time.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\run.ps1 `
+  -Mode 1to1 -ResumeCourseFull -DestinationConfirmedDisposable `
+  -ExpectedHistoryCount <count> -ExpectedHighWatermark <high_watermark> `
+  -ExpectedInventorySha256 '<sha256>' `
+  -Source '-1003535777660' -Destinations '-1004492904064'
+```
+
+`E2E_FULL_COURSE_COPY_AUTOMATED_PASS` means the local manifest and TEST Bot mappings cover the inventoried snapshot, and indexed internal links were processed. Open the TEST destination and check chronological order, albums, videos, appendix and rewritten links manually. This copy-only gate does not set a webhook, pin messages, switch on live sync, mark a run READY, change Production or touch the source channel. The Reader account still needs destination membership for independent Telethon read-only verification.
+
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
 Use `-SmokeOnly` **only with a disposable source that has no learners**. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.
