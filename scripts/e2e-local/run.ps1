@@ -4,7 +4,7 @@ param(
   [Parameter(Mandatory=$true)][string[]]$Destinations,
   [string]$PublicUrl = '',
   [switch]$SmokeOnly,
-  [switch]$ExistingTextOnly,
+  [Alias('ExistingTextOnly')][switch]$ExistingPostOnly,
   [switch]$DisposableSourceConfirmed,
   [switch]$DestinationConfirmedDisposable,
   [string]$ExpectedBotUsername = 'yeubep_distributor_test_bot'
@@ -18,10 +18,10 @@ if ($Mode -eq '1to1' -and $Destinations.Count -ne 1) { throw 'Mode 1to1 requires
 if ($Mode -eq '1to3' -and $Destinations.Count -ne 3) { throw 'Mode 1to3 requires exactly three destinations.' }
 if ($Mode -eq '1to3' -and -not $PublicUrl) { throw 'Mode 1to3 requires -PublicUrl from a temporary tunnel so the TEST bot can deliver the late-post webhook.' }
 if ($SmokeOnly -and $Mode -ne '1to1') { throw 'SmokeOnly supports Mode 1to1 only.' }
-if ($SmokeOnly -and $ExistingTextOnly) { throw 'Choose either -SmokeOnly or -ExistingTextOnly.' }
-if ($ExistingTextOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingTextOnly supports Mode 1to1 without a webhook tunnel.' }
-if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingTextOnly.' }
-if ($ExistingTextOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingTextOnly copies one old post to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
+if ($SmokeOnly -and $ExistingPostOnly) { throw 'Choose either -SmokeOnly or -ExistingPostOnly.' }
+if ($ExistingPostOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingPostOnly supports Mode 1to1 without a webhook tunnel.' }
+if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
+if ($ExistingPostOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingPostOnly copies one old post to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
 if (@($Destinations | Where-Object { $_.Trim() -eq $Source.Trim() }).Count -gt 0) { throw 'Source and destination must differ; refusing to post into the source channel.' }
 if ($ExpectedBotUsername.TrimStart('@').ToLowerInvariant() -ne 'yeubep_distributor_test_bot') { throw 'This harness requires @yeubep_distributor_test_bot.' }
 
@@ -160,8 +160,8 @@ $env:E2E_SOURCE_CHAT_ID = $Source
 $env:E2E_DESTINATION_CHAT_IDS = ($Destinations -join ',')
 $env:E2E_WAIT_FOR_LATE_POST = if ($Mode -eq '1to3') { 'true' } else { 'false' }
 $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
-$env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingTextOnly) { 'true' } else { 'false' }
-$env:E2E_EXISTING_COPY_ONLY = if ($ExistingTextOnly) { 'true' } else { 'false' }
+$env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly) { 'true' } else { 'false' }
+$env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly) { 'true' } else { 'false' }
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
 
 Push-Location $RepoRoot
@@ -222,9 +222,9 @@ try {
       if ($LASTEXITCODE -ne 0) { throw 'Could not set TEST bot webhook.' }
     }
 
-    if ($ExistingTextOnly) {
-      Write-Host 'Reading one existing plain-text post into the isolated local DB. No post, edit, pin or delete is made in the source channel.'
-      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-plain-text-only
+    if ($ExistingPostOnly) {
+      Write-Host 'Reading one existing post into the isolated local DB. No post, edit, pin or delete is made in the source channel.'
+      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-copyable-only
     }
     else {
       Write-Host 'Importing source history into isolated local DB. If Telethon asks for login/OTP, complete it locally; do not paste OTP into ChatGPT.'
@@ -236,9 +236,9 @@ try {
   node scripts/e2e-local/run-distributor.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
-  if ($ExistingTextOnly) {
-    Write-Host 'E2E_EXISTING_TEXT_COPY_AUTOMATED_PASS mode=1to1'
-    Write-Host 'Manual gate: confirm one old text post was copied to the disposable destination. The source channel was not changed.'
+  if ($ExistingPostOnly) {
+    Write-Host 'E2E_EXISTING_POST_COPY_AUTOMATED_PASS mode=1to1'
+    Write-Host 'Manual gate: confirm one old post was copied to the disposable destination. Links are not rewritten in this copy-only smoke.'
   }
   elseif ($SmokeOnly) {
     Write-Host 'E2E_SMOKE_AUTOMATED_GATE_PASS mode=1to1'

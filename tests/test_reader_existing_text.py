@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reader-cli"))
-from existing_text import eligible_existing_text, latest_plain_text
+from existing_text import eligible_existing_post, eligible_existing_text, latest_copyable_post, latest_plain_text
 
 
 class MessageEntityTextUrl:
@@ -21,8 +21,16 @@ class MessageEntityBold:
     pass
 
 
-def message(identifier, text, *, media=None, entities=None):
-    return SimpleNamespace(id=identifier, raw_text=text, media=media, entities=entities or [])
+class MessageMediaPhoto:
+    pass
+
+
+class MessageMediaDocument:
+    pass
+
+
+def message(identifier, text, *, media=None, entities=None, action=None):
+    return SimpleNamespace(id=identifier, raw_text=text, media=media, entities=entities or [], action=action)
 
 
 class FakeReader:
@@ -38,6 +46,10 @@ class FakeReader:
 
 async def collect(reader):
     return [item async for item in latest_plain_text(reader, "source")]
+
+
+async def collect_copyable(reader):
+    return [item async for item in latest_copyable_post(reader, "source")]
 
 
 class ExistingTextTests(unittest.TestCase):
@@ -60,6 +72,25 @@ class ExistingTextTests(unittest.TestCase):
 
     def test_empty_text_is_not_eligible(self):
         self.assertFalse(eligible_existing_text(message(3, "  ")))
+
+    def test_copyable_post_selects_existing_media_without_posting(self):
+        reader = FakeReader([
+            message(12, "channel setup", action=object()),
+            message(11, "", media=MessageMediaPhoto()),
+            message(10, "caption", media=MessageMediaDocument()),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_copyable(reader))], [11])
+        self.assertEqual(reader.visited, [12, 11])
+
+    def test_copyable_post_accepts_links_in_existing_text(self):
+        reader = FakeReader([message(4, "https://t.me/example/3", entities=[MessageEntityUrl()])])
+        self.assertEqual([item.id for item in asyncio.run(collect_copyable(reader))], [4])
+        self.assertTrue(eligible_existing_post(reader.messages[0]))
+
+    def test_copyable_post_rejects_service_and_unsupported_media(self):
+        reader = FakeReader([message(2, "service", action=object()), message(1, "", media=object())])
+        with self.assertRaisesRegex(RuntimeError, "No existing text, photo, video or document"):
+            asyncio.run(collect_copyable(reader))
 
 
 if __name__ == "__main__":

@@ -107,11 +107,11 @@ if (!smokeOnly) {
   if (!hasAlbum) throw new Error('Fixture missing 2+ member album');
   if (pinned.length !== 1) throw new Error(`Fixture must have exactly one pinned message; found ${pinned.length}`);
 } else {
-  if (messages.some((message) => message.message_type !== 'text')) {
+  if (!existingCopyOnly && messages.some((message) => message.message_type !== 'text')) {
     throw new Error('Smoke source manifest must contain plain text only');
   }
-  if (existingCopyOnly && (messages.length !== 1 || linksForNormalizedMessage(messages[0], source).length)) {
-    throw new Error('Existing copy requires exactly one plain-text post without internal links');
+  if (existingCopyOnly && messages.length !== 1) {
+    throw new Error('Existing copy requires exactly one source post');
   }
   console.log(`${existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
 }
@@ -160,7 +160,7 @@ if (existingCopyOnly) {
   if (!Number.isSafeInteger(destinationMessageId) || destinationMessageId <= 0) {
     throw new Error('Existing source post was not durably mapped to the destination');
   }
-  console.log(`E2E_EXISTING_TEXT_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${destinationMessageId} destination=${destinationChatIds[0]}`);
+  console.log(`E2E_EXISTING_POST_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${destinationMessageId} destination=${destinationChatIds[0]}`);
   process.exit(0);
 }
 

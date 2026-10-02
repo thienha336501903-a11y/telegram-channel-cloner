@@ -208,11 +208,17 @@ async def main():
     p.add_argument("--session", default="telegram-cloner-reader")
     p.add_argument("--progress-file", help=argparse.SUPPRESS)
     p.add_argument("--latest-plain-text-only", action="store_true", help="Index one existing text post without links; do not publish to source")
+    p.add_argument("--latest-copyable-only", action="store_true", help="Local E2E only: index one old text or media post for Bot API copy")
     # Keep each serverless request comfortably below the runtime deadline even
     # when a future/legacy message still requires Bot API hydration.
     p.add_argument("--batch-size", type=int, default=20)
     args = p.parse_args()
     if not args.api_id or not args.api_hash or not args.ingest_secret: p.error("api-id, api-hash and ingest-secret are required (flags or env vars)")
+    if args.latest_plain_text_only and args.latest_copyable_only:
+        p.error("Choose only one existing-post selection mode")
+    if args.latest_copyable_only and args.cloner_url.rstrip("/") != "http://127.0.0.1:8787":
+        p.error("--latest-copyable-only is restricted to the isolated local E2E server")
+    one_post_only = args.latest_plain_text_only or args.latest_copyable_only
 
     async with TelegramClient(local_session(args.session), args.api_id, args.api_hash) as client:
         entity = await resolve_channel(client, args.channel)
@@ -220,21 +226,21 @@ async def main():
         username = getattr(entity, "username", None); title = getattr(entity, "title", None); private_link_id = str(entity.id)
         registered = post_json(args.cloner_url, "/api/reader/register-source", args.ingest_secret, {"chat_id": str(bot_chat_id), "title": title, "username": username, "private_link_id": private_link_id})
         source_id = registered["source"]["id"]
-        history_summary = None if args.latest_plain_text_only else await client.get_messages(entity, limit=0)
-        history_total = 1 if args.latest_plain_text_only else max(0, int(getattr(history_summary, "total", 0) or 0))
+        history_summary = None if one_post_only else await client.get_messages(entity, limit=0)
+        history_total = 1 if one_post_only else max(0, int(getattr(history_summary, "total", 0) or 0))
         write_progress(args.progress_file, 0, history_total)
         role = "MASTER mirror" if registered.get("mirror_master") else "nguồn V4 không MASTER"
         print(f"Source: {title} ({source_id}) · {role}")
         pinned_ids = set()
-        if not args.latest_plain_text_only:
+        if not one_post_only:
             try:
                 from telethon.tl.types import InputMessagesFilterPinned
                 async for msg in client.iter_messages(entity, filter=InputMessagesFilterPinned): pinned_ids.add(int(msg.id))
             except Exception as e: print(f"Warning: could not enumerate pinned messages: {e}", file=sys.stderr)
 
-        if args.latest_plain_text_only:
-            from existing_text import latest_plain_text
-            messages = latest_plain_text(client, entity)
+        if one_post_only:
+            from existing_text import latest_copyable_post, latest_plain_text
+            messages = latest_copyable_post(client, entity) if args.latest_copyable_only else latest_plain_text(client, entity)
         else:
             messages = client.iter_messages(entity, reverse=True)
 
@@ -249,9 +255,15 @@ async def main():
             text = raw if not has_media else None; caption = raw if has_media and raw else None
             entities = [x for x in (entity_to_bot_api(e) for e in (msg.entities or [])) if x]
             message_type = classify(msg)
-            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": message_type, "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": reader_raw_message(msg, message_type)}
+            # The isolated copy-only run needs an ID/type for Bot API copyMessage,
+            # not a Reader media descriptor. Never ask ingestion to self-forward
+            # a historical media post into the live source to hydrate metadata.
+            local_copy_raw = {"e2e_copy_only": True}
+            item = {"source_message_id": int(msg.id), "media_group_id": str(msg.grouped_id) if msg.grouped_id else None, "message_type": message_type, "text": text, "text_entities": entities if text is not None else [], "caption": caption, "caption_entities": entities if caption is not None else [], "reply_to_source_message_id": int(msg.reply_to_msg_id) if msg.reply_to_msg_id else None, "is_pinned": int(msg.id) in pinned_ids, "source_date": msg.date.astimezone(timezone.utc).isoformat() if msg.date else None, "raw_message": local_copy_raw if args.latest_copyable_only else reader_raw_message(msg, message_type)}
             if args.latest_plain_text_only:
                 print(f"E2E_EXISTING_TEXT_SELECTED source_message_id={item['source_message_id']}")
+            elif args.latest_copyable_only:
+                print(f"E2E_EXISTING_POST_SELECTED source_message_id={item['source_message_id']} type={message_type}")
             batch.append(item); count += 1
             if len(batch) >= args.batch_size:
                 result = post_json(args.cloner_url, "/api/reader/ingest", args.ingest_secret, {"source_id": source_id, "messages": batch})
