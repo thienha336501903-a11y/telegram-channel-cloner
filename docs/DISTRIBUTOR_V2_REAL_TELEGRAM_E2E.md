@@ -115,6 +115,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\publish-
 
 After publish, open the reported index link in the Telegram app and click the first, middle, last, album and appendix entries. The legacy copy-only continuation must not be rerun once the index ledger exists: its existing pin-parity path expects no source pin and could unpin this destination-owned index. This pilot does **not** establish READY/live sync, 1→3, or general automatic index maintenance for later clones. Those need an index-aware pin policy and separate E2E gates before rollout.
 
+The owner confirmed in Telegram that index entries 01, 05 (album), 18 and 32 open their intended TEST posts and accepted the layout. Keep the existing pinned message #67 and its local ledger; no repost or appendix-boundary edit is required.
+
+### Register the existing TEST pin before any READY continuation
+
+Once migration 017 has passed CI on this branch, the same Windows computer can register the **existing** pinned TEST message in the retained local DB. The command checks the exact source/destination/run identity, saves another local `pg_dump`, applies migration 017 **only** to `tgcloner-e2e-db`, rereads the existing index and Telegram pin through the dedicated TEST bot, and registers message #67 with its content hash and H=56. It never sends, edits, pins or deletes a Telegram post:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local\register-existing-course-index.ps1
+```
+
+Expected final marker: `E2E_COURSE_INDEX_REGISTERED message_id=67 H=56`. Preserve the local DB, backup and index ledger on any failure. Do not run `-ResumeCourseFull`, even after registration; that command still stops at the index ledger. The new policy skips source pin parity for an explicitly registered destination-owned index while still requiring the final Bot API pin read to match. An unregistered destination pin blocks destructive pin work. New source posts beyond the registered index H make the index stale and prevent READY until a separately verified update is implemented. **Registration alone does not start live sync or mark this run READY.**
+
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
 Use `-SmokeOnly` **only with a disposable source that has no learners**. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.

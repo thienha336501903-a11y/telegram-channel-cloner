@@ -14,7 +14,9 @@ const SOURCE = '-1003535777660';
 const DESTINATION = '-1004492904064';
 const RUN = '023c3197-fe64-4ddf-9229-2632a2fad4a9';
 const EXPECTED_FIRST = [[2, 14], [3, 15], [4, 16], [5, 17], [7, 18]];
-const publish = process.argv.includes('--publish');
+const registerOnly = process.argv.includes('--register-only');
+const publish = process.argv.includes('--publish') || registerOnly;
+if (registerOnly && process.argv.includes('--publish')) throw new Error('Choose publish or register-only');
 const appendixStart = Number(process.env.E2E_INDEX_APPENDIX_START || 0) || null;
 
 const sql = `
@@ -135,6 +137,10 @@ try {
   if (chat.type !== 'channel' || String(chat.id) !== DESTINATION) throw new Error('TEST destination identity changed');
 
   const ledger = state || { version: 1, sourceChatId: SOURCE, destinationChatId: DESTINATION, runId: RUN };
+  if (registerOnly && (!state || state.phase !== 'published' || state.contentHash !== index.hash ||
+      !checkPinned(chat, index, state.messageId))) {
+    throw new Error('Existing TEST index ledger and Telegram pin must match exactly; registration made no Telegram write');
+  }
   if (!ledger.messageId) {
     if (chat.pinned_message) throw new Error('A different destination message is pinned; inspect before publishing');
     await saveState(statePath, { ...ledger, phase: 'armed', contentHash: index.hash });
@@ -184,6 +190,7 @@ try {
     throw new Error('A different message is pinned; refusing to alter it');
   }
   if (!beforePin.pinned_message) {
+    if (registerOnly) throw new Error('Register-only cannot pin a Telegram message');
     try { await pinMessageSafely({ chatId: DESTINATION, messageId: ledger.messageId }); }
     catch (error) {
       if (isKnownTelegramFailure(error) && error.retryAfter) {
@@ -197,6 +204,22 @@ try {
   ledger.phase = 'published';
   delete ledger.retryNotBefore;
   await saveState(statePath, ledger);
+  // Register the already verified pinned message for the local V2 run. If the
+  // local schema is not upgraded yet, the Telegram post and ledger stay intact;
+  // a rerun after migration 017 verifies the same post and registers it safely.
+  const destinationId = String(data.destination.id || '');
+  const messageId = Number(ledger.messageId);
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(destinationId) ||
+      !Number.isSafeInteger(messageId) || messageId < 1) throw new Error('Local index registration identity is invalid');
+  const registered = execFileSync('docker', ['exec', 'tgcloner-e2e-db', 'psql', '-U', 'postgres', '-d', 'postgres',
+    '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c',
+    `select d.course_index_message_id::text || ':' || d.course_index_content_hash || ':' || d.course_index_high_watermark::text
+     from public.tgcloner_distributor_register_course_index('${RUN}'::uuid, ${messageId}, '${index.hash}', ${index.highWatermark}) d
+     where d.id='${destinationId}'::uuid`], { encoding: 'utf8', timeout: 30_000 }).trim();
+  if (registered !== `${messageId}:${index.hash}:${index.highWatermark}`) {
+    throw new Error('Verified TEST index was not registered in the local DB');
+  }
+  console.log(`E2E_COURSE_INDEX_REGISTERED message_id=${messageId} H=${index.highWatermark}`);
   console.log(`E2E_COURSE_INDEX_PUBLISHED_PASS posts=53 entries=${index.groupCount} destination_message_id=${ledger.messageId} url=https://t.me/c/4492904064/${ledger.messageId}`);
 } finally {
   await lock.close();
