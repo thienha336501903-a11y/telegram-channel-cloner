@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reader-cli"))
-from existing_text import eligible_existing_post, eligible_existing_text, latest_copyable_post, latest_plain_text
+from existing_text import eligible_existing_post, eligible_existing_text, latest_copyable_post, latest_plain_text, recent_limited_copyable_posts
 
 
 class MessageEntityTextUrl:
@@ -29,8 +29,8 @@ class MessageMediaDocument:
     pass
 
 
-def message(identifier, text, *, media=None, entities=None, action=None):
-    return SimpleNamespace(id=identifier, raw_text=text, media=media, entities=entities or [], action=action)
+def message(identifier, text, *, media=None, entities=None, action=None, grouped_id=None, noforwards=False):
+    return SimpleNamespace(id=identifier, raw_text=text, media=media, entities=entities or [], action=action, grouped_id=grouped_id, noforwards=noforwards)
 
 
 class FakeReader:
@@ -50,6 +50,10 @@ async def collect(reader):
 
 async def collect_copyable(reader):
     return [item async for item in latest_copyable_post(reader, "source")]
+
+
+async def collect_limited(reader, limit=4, excluded_ids=(56,)):
+    return [item async for item in recent_limited_copyable_posts(reader, "source", limit=limit, excluded_ids=excluded_ids)]
 
 
 class ExistingTextTests(unittest.TestCase):
@@ -91,6 +95,31 @@ class ExistingTextTests(unittest.TestCase):
         reader = FakeReader([message(2, "service", action=object()), message(1, "", media=object())])
         with self.assertRaisesRegex(RuntimeError, "No existing text, photo, video or document"):
             asyncio.run(collect_copyable(reader))
+
+    def test_limited_copy_skips_previous_post_album_and_links(self):
+        reader = FakeReader([
+            message(56, "", media=MessageMediaPhoto()),
+            message(55, "photo", media=MessageMediaPhoto()),
+            message(54, "album", media=MessageMediaPhoto(), grouped_id=991),
+            message(53, "protected", media=MessageMediaPhoto(), noforwards=True),
+            message(52, "video", media=MessageMediaDocument()),
+            message(51, "https://t.me/c/123/20"),
+            message(50, "caption link", media=MessageMediaPhoto(), entities=[MessageEntityTextUrl()]),
+            message(49, "old text"),
+            message(48, "another photo", media=MessageMediaPhoto()),
+            message(47, "beyond limit"),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_limited(reader))], [55, 52, 49, 48])
+        self.assertEqual(reader.visited, [56, 55, 54, 53, 52, 51, 50, 49, 48])
+
+    def test_limited_copy_fails_without_any_other_standalone_post(self):
+        reader = FakeReader([message(56, "", media=MessageMediaPhoto()), message(55, "album", media=MessageMediaPhoto(), grouped_id=991)])
+        with self.assertRaisesRegex(RuntimeError, "No standalone post"):
+            asyncio.run(collect_limited(reader))
+
+    def test_limited_copy_rejects_more_than_four(self):
+        with self.assertRaisesRegex(ValueError, "1 to 4"):
+            asyncio.run(collect_limited(FakeReader([]), limit=5))
 
 
 if __name__ == "__main__":

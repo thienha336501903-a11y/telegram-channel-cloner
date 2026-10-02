@@ -18,11 +18,14 @@ const destinationChatIds = String(process.env.E2E_DESTINATION_CHAT_IDS || '')
 const waitForLatePost = String(process.env.E2E_WAIT_FOR_LATE_POST || '').toLowerCase() === 'true';
 const smokeOnly = String(process.env.E2E_SMOKE_ONLY || '').toLowerCase() === 'true';
 const existingCopyOnly = String(process.env.E2E_EXISTING_COPY_ONLY || '').toLowerCase() === 'true';
+const maxExistingCopies = Number(process.env.E2E_EXISTING_MAX_COPIES || 1);
+const excludedSourceId = Number(process.env.E2E_EXISTING_EXCLUDED_SOURCE_ID || 0);
 
 if (!sourceChatId) throw new Error('E2E_SOURCE_CHAT_ID is required');
 if (![1, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1 or 3 chat ids');
 if (smokeOnly && destinationChatIds.length !== 1) throw new Error('E2E smoke mode supports exactly one destination');
 if (existingCopyOnly && !smokeOnly) throw new Error('Existing copy requires isolated smoke mode');
+if (existingCopyOnly && (!Number.isSafeInteger(maxExistingCopies) || maxExistingCopies < 1 || maxExistingCopies > 4)) throw new Error('Existing copy is limited to four new destination posts');
 if (destinationChatIds.includes(sourceChatId)) throw new Error('Refusing to copy into the source channel');
 
 async function one(table, query) {
@@ -110,8 +113,13 @@ if (!smokeOnly) {
   if (!existingCopyOnly && messages.some((message) => message.message_type !== 'text')) {
     throw new Error('Smoke source manifest must contain plain text only');
   }
-  if (existingCopyOnly && messages.length !== 1) {
-    throw new Error('Existing copy requires exactly one source post');
+  if (existingCopyOnly && (messages.length < 1 || messages.length > maxExistingCopies)) {
+    throw new Error(`Existing copy manifest exceeds the ${maxExistingCopies}-post cap`);
+  }
+  if (existingCopyOnly && (maxExistingCopies > 1 || excludedSourceId > 0)) {
+    if (messages.some((message) => message.media_group_id || message.has_internal_links || Number(message.source_message_id) === excludedSourceId)) {
+      throw new Error('Limited copy cannot include an album member, source link or previously copied source post');
+    }
   }
   console.log(`${existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
 }
@@ -144,10 +152,14 @@ const runIds = runs.map((run) => run.id);
 console.log(`E2E_MANIFEST_CLOSED source=${source.chat_id} messages=${messages.length} destinations=${runIds.length} H=${highWatermark}`);
 
 if (existingCopyOnly) {
-  let mapping = null;
-  for (let cycle = 0; cycle < 60; cycle += 1) {
-    const rows = await select(TABLES.messageMappings, `select=source_message_id,destination_message_id&run_id=eq.${encodeURIComponent(runIds[0])}&source_message_id=eq.${Number(messages[0].source_message_id)}&status=eq.copied&limit=1`);
-    if (rows?.length) { mapping = rows[0]; break; }
+  const expectedSourceIds = new Set(messages.map((message) => Number(message.source_message_id)));
+  let mappings = [];
+  for (let cycle = 0; cycle < maxExistingCopies * 60; cycle += 1) {
+    const rows = await select(TABLES.messageMappings, `select=source_message_id,destination_message_id&run_id=eq.${encodeURIComponent(runIds[0])}&status=eq.copied`);
+    if (rows?.length === messages.length && rows.every((row) => expectedSourceIds.has(Number(row.source_message_id)))) {
+      mappings = rows;
+      break;
+    }
     const blockers = await unresolvedWork(runIds);
     if (blockers.length) throw new Error(`Existing copy blocker: ${JSON.stringify(blockers)}`);
     const claimed = await processClaimed(1);
@@ -156,11 +168,13 @@ if (existingCopyOnly) {
       await sleep(250);
     }
   }
-  const destinationMessageId = Number(mapping?.destination_message_id || 0);
-  if (!Number.isSafeInteger(destinationMessageId) || destinationMessageId <= 0) {
-    throw new Error('Existing source post was not durably mapped to the destination');
+  if (mappings.length !== messages.length || mappings.some((row) => !Number.isSafeInteger(Number(row.destination_message_id)) || Number(row.destination_message_id) <= 0)) {
+    throw new Error('Existing source posts were not all durably mapped to the destination');
   }
-  console.log(`E2E_EXISTING_POST_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${destinationMessageId} destination=${destinationChatIds[0]}`);
+  for (const mapping of mappings.sort((a, b) => Number(a.source_message_id) - Number(b.source_message_id))) {
+    console.log(`E2E_EXISTING_POST_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${mapping.destination_message_id} destination=${destinationChatIds[0]}`);
+  }
+  if (maxExistingCopies > 1 || excludedSourceId > 0) console.log(`E2E_LIMITED_COPY_PASS new_posts=${mappings.length} max_new=${maxExistingCopies} excluded_source=${excludedSourceId}`);
   process.exit(0);
 }
 

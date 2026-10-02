@@ -41,3 +41,34 @@ async def latest_copyable_post(client, entity):
             yield message
             return
     raise RuntimeError("No existing text, photo, video or document post is accessible in the source")
+
+
+def eligible_limited_copy(message, excluded_ids=()):
+    """Avoid album fragments and links that would still point at the source."""
+    if not eligible_existing_post(message) or int(message.id) in excluded_ids or getattr(message, "noforwards", False):
+        return False
+    if getattr(message, "grouped_id", None):
+        return False
+    raw = str(getattr(message, "raw_text", "") or "")
+    if re.search(r"(?:https?://|www\.|t\.me/|telegram\.me/|tg://)", raw, re.IGNORECASE):
+        return False
+    return not any(
+        item.__class__.__name__ in ("MessageEntityUrl", "MessageEntityTextUrl")
+        for item in (getattr(message, "entities", None) or [])
+    )
+
+
+async def recent_limited_copyable_posts(client, entity, *, limit, excluded_ids=()):
+    if not 1 <= limit <= 4:
+        raise ValueError("Limited copy accepts 1 to 4 new posts")
+    excluded = set(int(value) for value in excluded_ids)
+    selected = 0
+    async for message in client.iter_messages(entity):
+        if not eligible_limited_copy(message, excluded):
+            continue
+        yield message
+        selected += 1
+        if selected == limit:
+            return
+    if selected == 0:
+        raise RuntimeError("No standalone post without links is accessible after the excluded source post")

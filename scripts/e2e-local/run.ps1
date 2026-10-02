@@ -5,6 +5,8 @@ param(
   [string]$PublicUrl = '',
   [switch]$SmokeOnly,
   [Alias('ExistingTextOnly')][switch]$ExistingPostOnly,
+  [ValidateRange(1,4)][int]$ExistingPostsLimit = 1,
+  [long]$SkipSourceMessageId = 0,
   [switch]$DisposableSourceConfirmed,
   [switch]$DestinationConfirmedDisposable,
   [string]$ExpectedBotUsername = 'yeubep_distributor_test_bot'
@@ -21,7 +23,9 @@ if ($SmokeOnly -and $Mode -ne '1to1') { throw 'SmokeOnly supports Mode 1to1 only
 if ($SmokeOnly -and $ExistingPostOnly) { throw 'Choose either -SmokeOnly or -ExistingPostOnly.' }
 if ($ExistingPostOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingPostOnly supports Mode 1to1 without a webhook tunnel.' }
 if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
-if ($ExistingPostOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingPostOnly copies one old post to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
+if ($ExistingPostOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingPostOnly copies old posts to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
+if (-not $ExistingPostOnly -and ($ExistingPostsLimit -ne 1 -or $SkipSourceMessageId -ne 0)) { throw 'ExistingPostsLimit and SkipSourceMessageId require -ExistingPostOnly.' }
+if ($SkipSourceMessageId -lt 0) { throw 'SkipSourceMessageId must be non-negative.' }
 if (@($Destinations | Where-Object { $_.Trim() -eq $Source.Trim() }).Count -gt 0) { throw 'Source and destination must differ; refusing to post into the source channel.' }
 if ($ExpectedBotUsername.TrimStart('@').ToLowerInvariant() -ne 'yeubep_distributor_test_bot') { throw 'This harness requires @yeubep_distributor_test_bot.' }
 
@@ -162,6 +166,8 @@ $env:E2E_WAIT_FOR_LATE_POST = if ($Mode -eq '1to3') { 'true' } else { 'false' }
 $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
 $env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly) { 'true' } else { 'false' }
 $env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly) { 'true' } else { 'false' }
+$env:E2E_EXISTING_MAX_COPIES = if ($ExistingPostOnly) { [string]$ExistingPostsLimit } else { '0' }
+$env:E2E_EXISTING_EXCLUDED_SOURCE_ID = [string]$SkipSourceMessageId
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
 
 Push-Location $RepoRoot
@@ -223,8 +229,13 @@ try {
     }
 
     if ($ExistingPostOnly) {
-      Write-Host 'Reading one existing post into the isolated local DB. No post, edit, pin or delete is made in the source channel.'
-      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-copyable-only
+      Write-Host "Reading at most $ExistingPostsLimit existing post(s) into the isolated local DB. No post, edit, pin or delete is made in the source channel."
+      if ($ExistingPostsLimit -eq 1 -and $SkipSourceMessageId -eq 0) {
+        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-copyable-only
+      }
+      else {
+        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --recent-safe-copy-limit $ExistingPostsLimit --exclude-source-id $SkipSourceMessageId
+      }
     }
     else {
       Write-Host 'Importing source history into isolated local DB. If Telethon asks for login/OTP, complete it locally; do not paste OTP into ChatGPT.'
@@ -237,8 +248,13 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
   if ($ExistingPostOnly) {
-    Write-Host 'E2E_EXISTING_POST_COPY_AUTOMATED_PASS mode=1to1'
-    Write-Host 'Manual gate: confirm one old post was copied to the disposable destination. Links are not rewritten in this copy-only smoke.'
+    if ($ExistingPostsLimit -eq 1 -and $SkipSourceMessageId -eq 0) {
+      Write-Host 'E2E_EXISTING_POST_COPY_AUTOMATED_PASS mode=1to1'
+    }
+    else {
+      Write-Host "E2E_LIMITED_POSTS_COPY_AUTOMATED_PASS max_new=$ExistingPostsLimit skipped_source=$SkipSourceMessageId"
+    }
+    Write-Host 'Manual gate: confirm only the selected old posts were copied to the disposable destination. Albums and posts with links are skipped in limited mode.'
   }
   elseif ($SmokeOnly) {
     Write-Host 'E2E_SMOKE_AUTOMATED_GATE_PASS mode=1to1'

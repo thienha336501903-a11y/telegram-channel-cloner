@@ -1,6 +1,6 @@
 # Distributor V2 — Real Telegram E2E harness
 
-The full E2E fixture uses **System B test channels only**. A separate opt-in copy-only check can read one old post from an owner-controlled source with learners, but writes only to an isolated local DB and a confirmed disposable destination. Neither mode uses Supabase B Production, the Production bot/webhook, `reader.yeubep.shop`, learner records, or System A.
+The full E2E fixture uses **System B test channels only**. A separate opt-in copy-only check can read up to four old posts from an owner-controlled source with learners, but writes only to an isolated local DB and a confirmed disposable destination. Neither mode uses Supabase B Production, the Production bot/webhook, `reader.yeubep.shop`, learner records, or System A.
 
 ## What it proves
 
@@ -41,6 +41,19 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
 ```
 
 Enter the TEST bot token locally. If the same Windows user already has Reader Manager (`%LOCALAPPDATA%\YeuNauAnReader\reader-manager.dat`) or the older Reader CLI secrets file, the harness decrypts only the Telegram app API ID/hash locally and does not prompt for them. It does not reuse a Reader Manager Telegram session, agent token or Production ingest secret. Otherwise it prompts for the API ID/hash; Telegram issues those app credentials through [API development tools](https://my.telegram.org). This run uses its own `telegram-cloner-e2e-reader` session. Telethon may ask for a one-time login code if the E2E session does not exist. No token, hash or code belongs in chat. `E2E_EXISTING_POST_COPY_PASS` reports the original and destination message IDs; `E2E_EXISTING_POST_COPY_AUTOMATED_PASS` means the Bot API copy and durable local mapping succeeded. Manually open destination A and compare the copied post. This is a **copy-only smoke**, not a READY/fidelity or live catch-up gate.
+
+### Limited follow-up: at most five copied posts including the earlier photo
+
+If the first run already copied source post `56` as destination post `9`, copy **at most four additional** old posts with the same confirmed disposable destination:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
+  -Mode 1to1 -ExistingPostOnly -DestinationConfirmedDisposable `
+  -ExistingPostsLimit 4 -SkipSourceMessageId 56 `
+  -Source '-100SOURCE' -Destinations '-100DEST_A'
+```
+
+The selector excludes source `56`, selects at most four other standalone text/photo/video/document posts, and skips album members, protected posts and posts with links so that it cannot break an album or leave source links in copied posts. The worker independently enforces the four-post limit before contacting Telegram. It logs one source→destination mapping per new post and `E2E_LIMITED_COPY_PASS new_posts=N`. This is a real Telegram copy to the disposable destination, but the local mapping is not a Production mirror: it does not copy all history, rewrite links, mark the destination READY, or sync later posts. The earlier destination post `9` remains; no deletion occurs. If a failure happens after any copy log or a network failure makes the outcome uncertain, inspect the destination and local DB before attempting another run, because the harness resets the local DB at startup and a blind retry could duplicate messages.
 
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
