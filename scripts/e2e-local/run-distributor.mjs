@@ -5,7 +5,9 @@ import {
   claimDistributorWork,
   closeDistributorManifest,
   createDistributorRun,
-  getDistributorProgress
+  getDistributorProgress,
+  prepareDistributorCatchup,
+  prepareDistributorFidelity
 } from '../../lib/distributor-repository.js';
 import { advanceDistributorRun, processDistributorWork } from '../../lib/distributor-engine.js';
 import { getChatSafely } from '../../lib/distributor-telegram.js';
@@ -18,6 +20,7 @@ const destinationChatIds = String(process.env.E2E_DESTINATION_CHAT_IDS || '')
 const waitForLatePost = String(process.env.E2E_WAIT_FOR_LATE_POST || '').toLowerCase() === 'true';
 const smokeOnly = String(process.env.E2E_SMOKE_ONLY || '').toLowerCase() === 'true';
 const existingCopyOnly = String(process.env.E2E_EXISTING_COPY_ONLY || '').toLowerCase() === 'true';
+const coursePrefix = String(process.env.E2E_EXISTING_COURSE_PREFIX || '').toLowerCase() === 'true';
 const maxExistingCopies = Number(process.env.E2E_EXISTING_MAX_COPIES || 1);
 const excludedSourceId = Number(process.env.E2E_EXISTING_EXCLUDED_SOURCE_ID || 0);
 
@@ -25,7 +28,8 @@ if (!sourceChatId) throw new Error('E2E_SOURCE_CHAT_ID is required');
 if (![1, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1 or 3 chat ids');
 if (smokeOnly && destinationChatIds.length !== 1) throw new Error('E2E smoke mode supports exactly one destination');
 if (existingCopyOnly && !smokeOnly) throw new Error('Existing copy requires isolated smoke mode');
-if (existingCopyOnly && (!Number.isSafeInteger(maxExistingCopies) || maxExistingCopies < 1 || maxExistingCopies > 4)) throw new Error('Existing copy is limited to four new destination posts');
+if (existingCopyOnly && (!Number.isSafeInteger(maxExistingCopies) || maxExistingCopies < 1 || maxExistingCopies > (coursePrefix ? 5 : 1))) throw new Error('Existing copy is limited to five course posts or one single-post smoke');
+if (coursePrefix && (!existingCopyOnly || excludedSourceId)) throw new Error('Chronological course copy cannot skip any source post');
 if (destinationChatIds.includes(sourceChatId)) throw new Error('Refusing to copy into the source channel');
 
 async function one(table, query) {
@@ -57,9 +61,10 @@ async function mappingCount(runIds) {
   return total;
 }
 
-async function processClaimed(limit) {
+async function processClaimed(limit, { allowedPhase = null } = {}) {
   const claimed = await claimDistributorWork({ workerId, limit, leaseSeconds: 120 });
   for (const work of claimed) {
+    if (allowedPhase && work.phase !== allowedPhase) throw new Error(`Course copy-only run refused unexpected ${work.phase} work before any Telegram side effect`);
     const result = await processDistributorWork(work, { workerId });
     if (!result?.ok && result?.work?.status === 'blocked_ambiguous') {
       throw new Error(`BLOCKED_AMBIGUOUS work=${work.id}; reconcile manually before any retry`);
@@ -116,9 +121,22 @@ if (!smokeOnly) {
   if (existingCopyOnly && (messages.length < 1 || messages.length > maxExistingCopies)) {
     throw new Error(`Existing copy manifest exceeds the ${maxExistingCopies}-post cap`);
   }
-  if (existingCopyOnly && (maxExistingCopies > 1 || excludedSourceId > 0)) {
-    if (messages.some((message) => message.media_group_id || message.has_internal_links || Number(message.source_message_id) === excludedSourceId)) {
-      throw new Error('Limited copy cannot include an album member, source link or previously copied source post');
+  if (existingCopyOnly && coursePrefix) {
+    const ids = new Set(messages.map((message) => Number(message.source_message_id)));
+    const groups = new Map();
+    for (const [index, message] of messages.entries()) {
+      if (message.media_group_id) {
+        const positions = groups.get(message.media_group_id) || [];
+        positions.push(index);
+        groups.set(message.media_group_id, positions);
+      }
+      const sourceLinks = linksForNormalizedMessage(message, { private_link_id: source.private_link_id, username: source.username });
+      if (sourceLinks.some((link) => !ids.has(Number(link.source_message_id)))) {
+        throw new Error(`Course post ${message.source_message_id} links to an uncopied source post; refusing to leave a source link in the destination`);
+      }
+    }
+    if ([...groups.values()].some((positions) => positions.length < 2 || positions.some((position, i) => i && position !== positions[i - 1] + 1))) {
+      throw new Error('Course manifest contains an incomplete album');
     }
   }
   console.log(`${existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
@@ -171,10 +189,41 @@ if (existingCopyOnly) {
   if (mappings.length !== messages.length || mappings.some((row) => !Number.isSafeInteger(Number(row.destination_message_id)) || Number(row.destination_message_id) <= 0)) {
     throw new Error('Existing source posts were not all durably mapped to the destination');
   }
-  for (const mapping of mappings.sort((a, b) => Number(a.source_message_id) - Number(b.source_message_id))) {
+  mappings.sort((a, b) => Number(a.source_message_id) - Number(b.source_message_id));
+  if (coursePrefix && mappings.some((mapping, index) => index > 0 && Number(mapping.destination_message_id) <= Number(mappings[index - 1].destination_message_id))) {
+    throw new Error('Copied course posts are not in chronological destination order; reconcile before any retry');
+  }
+  if (coursePrefix) {
+    const linkPosts = messages.filter((message) => message.has_internal_links);
+    if (linkPosts.length) {
+      let rewriting = false;
+      for (let cycle = 0; cycle < 40; cycle += 1) {
+        const run = await one(TABLES.cloneRuns, `select=phase,status&id=eq.${encodeURIComponent(runIds[0])}&limit=1`);
+        if (run?.phase === 'rewriting' && run.status === 'active') { rewriting = true; break; }
+        if (!run || run.status !== 'active') throw new Error('Course run was blocked before link rewrite');
+        await prepareDistributorCatchup({ runId: runIds[0], albumSettleSeconds: 0, quietSeconds: 0 });
+        await sleep(100);
+      }
+      if (!rewriting) throw new Error('Course link rewrite phase did not become ready');
+      await prepareDistributorFidelity({ runId: runIds[0], pinnedSourceMessageId: null });
+      for (let cycle = 0; cycle < linkPosts.length * 10; cycle += 1) {
+        const rewrites = await select(TABLES.cloneWork, `select=id,status,source_message_id,result&run_id=eq.${encodeURIComponent(runIds[0])}&phase=eq.rewrite`);
+        if (rewrites?.length === linkPosts.length && rewrites.every((work) => work.status === 'done' && work.result?.actual_verified === true)) {
+          console.log(`E2E_COURSE_LINK_REWRITE_PASS posts=${rewrites.length}`);
+          break;
+        }
+        const blockers = await unresolvedWork(runIds);
+        if (blockers.length) throw new Error(`Course rewrite blocker: ${JSON.stringify(blockers)}`);
+        const claimed = await processClaimed(1, { allowedPhase: 'rewrite' });
+        if (!claimed) await sleep(100);
+        if (cycle === linkPosts.length * 10 - 1) throw new Error('Course links were not all rewritten');
+      }
+    }
+  }
+  for (const mapping of mappings) {
     console.log(`E2E_EXISTING_POST_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${mapping.destination_message_id} destination=${destinationChatIds[0]}`);
   }
-  if (maxExistingCopies > 1 || excludedSourceId > 0) console.log(`E2E_LIMITED_COPY_PASS new_posts=${mappings.length} max_new=${maxExistingCopies} excluded_source=${excludedSourceId}`);
+  if (coursePrefix) console.log(`E2E_COURSE_PREFIX_COPY_PASS posts=${mappings.length} max_posts=${maxExistingCopies}`);
   process.exit(0);
 }
 

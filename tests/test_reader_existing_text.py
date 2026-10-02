@@ -6,11 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reader-cli"))
-from existing_text import eligible_existing_post, eligible_existing_text, latest_copyable_post, latest_plain_text, recent_limited_copyable_posts
+from existing_text import eligible_existing_post, eligible_existing_text, latest_copyable_post, latest_plain_text, oldest_course_prefix, recent_limited_copyable_posts
 
 
 class MessageEntityTextUrl:
-    pass
+    def __init__(self, url=None):
+        self.url = url
 
 
 class MessageEntityUrl:
@@ -38,8 +39,8 @@ class FakeReader:
         self.messages = messages
         self.visited = []
 
-    async def iter_messages(self, entity):
-        for item in self.messages:
+    async def iter_messages(self, entity, reverse=False):
+        for item in reversed(self.messages) if reverse else self.messages:
             self.visited.append(item.id)
             yield item
 
@@ -54,6 +55,10 @@ async def collect_copyable(reader):
 
 async def collect_limited(reader, limit=4, excluded_ids=(56,)):
     return [item async for item in recent_limited_copyable_posts(reader, "source", limit=limit, excluded_ids=excluded_ids)]
+
+
+async def collect_prefix(reader, limit=5, entity="source"):
+    return [item async for item in oldest_course_prefix(reader, entity, limit=limit)]
 
 
 class ExistingTextTests(unittest.TestCase):
@@ -120,6 +125,84 @@ class ExistingTextTests(unittest.TestCase):
     def test_limited_copy_rejects_more_than_four(self):
         with self.assertRaisesRegex(ValueError, "1 to 4"):
             asyncio.run(collect_limited(FakeReader([]), limit=5))
+
+    def test_course_prefix_uses_earliest_five_visible_posts_without_gaps(self):
+        reader = FakeReader([
+            message(56, "newer"), message(55, "new"), message(6, "lesson 5"),
+            message(5, "lesson 4", media=MessageMediaPhoto(), grouped_id=991),
+            message(4, "lesson 3", media=MessageMediaPhoto(), grouped_id=991),
+            message(3, "lesson 2"), message(2, "lesson 1"), message(1, "", action=object()),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader))], [2, 3, 4, 5, 6])
+        self.assertEqual(reader.visited, [1, 2, 3, 4, 5, 6, 55])
+
+    def test_course_prefix_keeps_link_for_preflight_and_rewrite(self):
+        reader = FakeReader([message(9, "later"), message(4, "later"), message(3, "link", entities=[MessageEntityTextUrl()]), message(2, "first")])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader, limit=4))], [2, 3, 4, 9])
+
+    def test_course_prefix_blocks_protected_post_before_copy(self):
+        reader = FakeReader([message(4, "later"), message(3, "protected", noforwards=True), message(2, "first")])
+        with self.assertRaisesRegex(RuntimeError, "source_message_id=3 reason=protected_post"):
+            asyncio.run(collect_prefix(reader))
+
+    def test_course_prefix_stops_before_partial_album_or_split_limit(self):
+        reader = FakeReader([message(7, "later"), message(5, "album", media=MessageMediaPhoto(), grouped_id=991), message(4, "before")])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader))], [4])
+        reader = FakeReader([
+            message(7, "later"), message(5, "album-other", media=MessageMediaPhoto(), grouped_id=992),
+            message(4, "album-first", media=MessageMediaPhoto(), grouped_id=991),
+            message(3, "video2", media=MessageMediaDocument()), message(2, "video1", media=MessageMediaDocument()),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader))], [2, 3])
+        reader = FakeReader([
+            message(7, "album3", media=MessageMediaPhoto(), grouped_id=991),
+            message(6, "album2", media=MessageMediaPhoto(), grouped_id=991),
+            message(5, "album1", media=MessageMediaPhoto(), grouped_id=991),
+            message(4, "lesson4"), message(3, "lesson3"), message(2, "lesson2"), message(1, "lesson1")
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader))], [1, 2, 3, 4])
+
+    def test_course_prefix_stops_before_link_to_sixth_post_without_skipping(self):
+        source = SimpleNamespace(id=3535777660, username=None)
+        reader = FakeReader([
+            message(8, "later"),
+            message(7, "caption", media=MessageMediaPhoto(), entities=[MessageEntityTextUrl("https://t.me/c/3535777660/8")]),
+            message(5, "album2", media=MessageMediaDocument(), grouped_id=991),
+            message(4, "album1", media=MessageMediaDocument(), grouped_id=991),
+            message(3, "video2", media=MessageMediaDocument()),
+            message(2, "video1", media=MessageMediaDocument()),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader, entity=source))], [2, 3, 4, 5])
+
+    def test_course_prefix_rechecks_earlier_links_after_truncation(self):
+        source = SimpleNamespace(id=3535777660, username=None)
+        reader = FakeReader([
+            message(8, "later"),
+            message(7, "link to later", entities=[MessageEntityTextUrl("https://t.me/c/3535777660/8")]),
+            message(5, "album2", media=MessageMediaDocument(), grouped_id=991),
+            message(4, "album1", media=MessageMediaDocument(), grouped_id=991),
+            message(3, "video2", media=MessageMediaDocument()),
+            message(2, "link to fifth", entities=[MessageEntityTextUrl("https://t.me/c/3535777660/7")]),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "No safe chronological course prefix"):
+            asyncio.run(collect_prefix(reader, entity=source))
+
+    def test_course_prefix_keeps_internal_link_to_included_post_and_external_link(self):
+        source = SimpleNamespace(id=3535777660, username=None)
+        reader = FakeReader([
+            message(7, "caption https://example.com/help", media=MessageMediaPhoto(), entities=[MessageEntityTextUrl("https://t.me/c/3535777660/2")]),
+            message(5, "album2", media=MessageMediaDocument(), grouped_id=991),
+            message(4, "album1", media=MessageMediaDocument(), grouped_id=991),
+            message(3, "video2", media=MessageMediaDocument()),
+            message(2, "video1", media=MessageMediaDocument()),
+        ])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader, entity=source))], [2, 3, 4, 5, 7])
+
+    def test_course_prefix_allows_fewer_than_five_and_rejects_six(self):
+        reader = FakeReader([message(2, "second"), message(1, "first")])
+        self.assertEqual([item.id for item in asyncio.run(collect_prefix(reader))], [1, 2])
+        with self.assertRaisesRegex(ValueError, "1 to 5"):
+            asyncio.run(collect_prefix(reader, limit=6))
 
 
 if __name__ == "__main__":

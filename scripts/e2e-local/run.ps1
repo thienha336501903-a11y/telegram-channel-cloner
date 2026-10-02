@@ -5,7 +5,11 @@ param(
   [string]$PublicUrl = '',
   [switch]$SmokeOnly,
   [Alias('ExistingTextOnly')][switch]$ExistingPostOnly,
-  [ValidateRange(1,4)][int]$ExistingPostsLimit = 1,
+  [ValidateRange(1,5)][int]$ExistingPostsLimit = 1,
+  [switch]$CoursePrefix,
+  [switch]$InspectCourseOnly,
+  [switch]$RepairKnownTestCopies,
+  [switch]$DestinationConfirmedEmpty,
   [long]$SkipSourceMessageId = 0,
   [switch]$DisposableSourceConfirmed,
   [switch]$DestinationConfirmedDisposable,
@@ -24,6 +28,15 @@ if ($SmokeOnly -and $ExistingPostOnly) { throw 'Choose either -SmokeOnly or -Exi
 if ($ExistingPostOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingPostOnly supports Mode 1to1 without a webhook tunnel.' }
 if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
 if ($ExistingPostOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingPostOnly copies old posts to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
+if ($InspectCourseOnly -and ($Mode -ne '1to1' -or $ExistingPostOnly -or $SmokeOnly -or $CoursePrefix -or $SkipSourceMessageId -ne 0 -or $ExistingPostsLimit -ne 1)) { throw 'InspectCourseOnly reads source/destination history in 1to1 mode without copy switches.' }
+if ($CoursePrefix -and -not $ExistingPostOnly) { throw 'CoursePrefix requires -ExistingPostOnly.' }
+if (($RepairKnownTestCopies -or $DestinationConfirmedEmpty) -and -not $CoursePrefix) { throw 'The repair/empty-destination flags require -CoursePrefix.' }
+if ($RepairKnownTestCopies -and $DestinationConfirmedEmpty) { throw 'Choose exactly one destination preparation mode.' }
+if ($CoursePrefix -and -not ($RepairKnownTestCopies -or $DestinationConfirmedEmpty)) { throw 'CoursePrefix requires verified cleanup of the known TEST copies or a confirmed empty new destination.' }
+if ($CoursePrefix -and $Destinations[0].Trim() -eq '-1004492904064' -and -not $RepairKnownTestCopies) { throw 'This known TEST destination already has five out-of-order copies; use -RepairKnownTestCopies so the exact mappings are checked before removal.' }
+if ($RepairKnownTestCopies -and ($Source.Trim() -ne '-1003535777660' -or $Destinations[0].Trim() -ne '-1004492904064' -or $ExistingPostsLimit -gt 5)) { throw 'Known TEST repair is restricted to the documented source, destination and at most five posts.' }
+if ($SkipSourceMessageId -ne 0) { throw 'The earlier skip/recent copy mode did not preserve course order. Reconcile and remove its exact destination copies first; then use -CoursePrefix.' }
+if ($ExistingPostsLimit -gt 1 -and -not $CoursePrefix) { throw 'Multi-post copy requires -CoursePrefix to preserve the first lessons in source order.' }
 if (-not $ExistingPostOnly -and ($ExistingPostsLimit -ne 1 -or $SkipSourceMessageId -ne 0)) { throw 'ExistingPostsLimit and SkipSourceMessageId require -ExistingPostOnly.' }
 if ($SkipSourceMessageId -lt 0) { throw 'SkipSourceMessageId must be non-negative.' }
 if (@($Destinations | Where-Object { $_.Trim() -eq $Source.Trim() }).Count -gt 0) { throw 'Source and destination must differ; refusing to post into the source channel.' }
@@ -140,8 +153,8 @@ function Wait-PostgrestSchema {
   throw "PostgREST V2 schema cache did not become ready. Last error: $lastError"
 }
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop/docker CLI is required.' }
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
+if (-not $InspectCourseOnly -and -not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Desktop/docker CLI is required.' }
+if (-not $InspectCourseOnly -and -not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
 if (-not $SmokeOnly -and -not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required for full Telegram E2E.' }
 
 Remove-Item Env:TELEGRAM_SESSION_STRING -ErrorAction SilentlyContinue
@@ -152,6 +165,34 @@ if (-not $SmokeOnly) {
   if ($env:TELEGRAM_API_ID -notmatch '^\d+$' -or $env:TELEGRAM_API_HASH -notmatch '^[0-9a-fA-F]{32}$') {
     throw 'Invalid Telegram app API ID/hash. They must come from my.telegram.org or the encrypted local Reader configuration.'
   }
+}
+if ($InspectCourseOnly) {
+  Push-Location $RepoRoot
+  try {
+    python scripts/e2e-local/inspect-course.py --source $Source --destination $Destinations[0] --limit 5
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only course inspection failed.' }
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+      docker exec tgcloner-e2e-db pg_isready -U postgres -d postgres *> $null
+      if ($LASTEXITCODE -eq 0) {
+        $destChat = $Destinations[0].Trim()
+        if ($destChat -notmatch '^-100\d+$') { throw 'Destination channel ID must be numeric for local mapping inspection.' }
+        $sql = "select m.source_message_id, m.destination_message_id, m.status from public.tgcloner_message_mappings m join public.tgcloner_destinations d on d.id=m.destination_id where d.chat_id='$destChat' order by m.destination_message_id;"
+        docker exec tgcloner-e2e-db psql -U postgres -d postgres -P pager=off -c $sql
+        if ($LASTEXITCODE -ne 0) { throw 'Could not read local E2E mappings.' }
+      }
+      else { Write-Host 'E2E_LOCAL_DB_UNAVAILABLE; paste the previous copy log instead of rerunning.' }
+    }
+  }
+  finally { Pop-Location }
+  return
+}
+if ($CoursePrefix) {
+  Push-Location $RepoRoot
+  try {
+    python scripts/e2e-local/inspect-course.py --source $Source --destination $Destinations[0] --limit $ExistingPostsLimit --require-ready
+    if ($LASTEXITCODE -ne 0) { throw 'Course preflight blocked copy. Do not retry until the reported issue is reconciled.' }
+  }
+  finally { Pop-Location }
 }
 $env:TELEGRAM_BOT_TOKEN = Read-PlainSecret 'Dán token của BOT TEST (không phải bot Production)'
 $env:READER_INGEST_SECRET = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
@@ -167,6 +208,7 @@ $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
 $env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly) { 'true' } else { 'false' }
 $env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly) { 'true' } else { 'false' }
 $env:E2E_EXISTING_MAX_COPIES = if ($ExistingPostOnly) { [string]$ExistingPostsLimit } else { '0' }
+$env:E2E_EXISTING_COURSE_PREFIX = if ($CoursePrefix) { 'true' } else { 'false' }
 $env:E2E_EXISTING_EXCLUDED_SOURCE_ID = [string]$SkipSourceMessageId
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
 
@@ -176,6 +218,10 @@ try {
   if (-not $SmokeOnly) {
     node scripts/e2e-local/verify-test-bot.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Only the dedicated TEST bot can run E2E.' }
+  }
+  if ($RepairKnownTestCopies) {
+    node scripts/e2e-local/repair-test-copies.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Known TEST copies were not all safely removed; local DB was preserved. Do not retry blindly.' }
   }
   docker compose -f $Compose down -v --remove-orphans | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
@@ -230,11 +276,11 @@ try {
 
     if ($ExistingPostOnly) {
       Write-Host "Reading at most $ExistingPostsLimit existing post(s) into the isolated local DB. No post, edit, pin or delete is made in the source channel."
-      if ($ExistingPostsLimit -eq 1 -and $SkipSourceMessageId -eq 0) {
-        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-copyable-only
+      if ($CoursePrefix) {
+        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --course-prefix-limit $ExistingPostsLimit
       }
-      else {
-        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --recent-safe-copy-limit $ExistingPostsLimit --exclude-source-id $SkipSourceMessageId
+      elseif ($ExistingPostsLimit -eq 1) {
+        python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-copyable-only
       }
     }
     else {
@@ -248,13 +294,13 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
   if ($ExistingPostOnly) {
-    if ($ExistingPostsLimit -eq 1 -and $SkipSourceMessageId -eq 0) {
+    if (-not $CoursePrefix) {
       Write-Host 'E2E_EXISTING_POST_COPY_AUTOMATED_PASS mode=1to1'
     }
     else {
-      Write-Host "E2E_LIMITED_POSTS_COPY_AUTOMATED_PASS max_new=$ExistingPostsLimit skipped_source=$SkipSourceMessageId"
+      Write-Host "E2E_COURSE_PREFIX_COPY_AUTOMATED_PASS max_posts=$ExistingPostsLimit"
     }
-    Write-Host 'Manual gate: confirm only the selected old posts were copied to the disposable destination. Albums and posts with links are skipped in limited mode.'
+    Write-Host 'Manual gate: confirm the selected source posts appear in ascending source order at the destination.'
   }
   elseif ($SmokeOnly) {
     Write-Host 'E2E_SMOKE_AUTOMATED_GATE_PASS mode=1to1'

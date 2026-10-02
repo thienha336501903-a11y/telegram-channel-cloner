@@ -42,18 +42,29 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
 
 Enter the TEST bot token locally. If the same Windows user already has Reader Manager (`%LOCALAPPDATA%\YeuNauAnReader\reader-manager.dat`) or the older Reader CLI secrets file, the harness decrypts only the Telegram app API ID/hash locally and does not prompt for them. It does not reuse a Reader Manager Telegram session, agent token or Production ingest secret. Otherwise it prompts for the API ID/hash; Telegram issues those app credentials through [API development tools](https://my.telegram.org). This run uses its own `telegram-cloner-e2e-reader` session. Telethon may ask for a one-time login code if the E2E session does not exist. No token, hash or code belongs in chat. `E2E_EXISTING_POST_COPY_PASS` reports the original and destination message IDs; `E2E_EXISTING_POST_COPY_AUTOMATED_PASS` means the Bot API copy and durable local mapping succeeded. Manually open destination A and compare the copied post. This is a **copy-only smoke**, not a READY/fidelity or live catch-up gate.
 
-### Limited follow-up: at most five copied posts including the earlier photo
+### Chronological course prefix: no more than five posts
 
-If the first run already copied source post `56` as destination post `9`, copy **at most four additional** old posts with the same confirmed disposable destination:
+The older `-SkipSourceMessageId 56 -ExistingPostsLimit 4` follow-up selected **recent** posts and left the earlier destination post `9` ahead of older lessons. That command is now blocked. Before any further copy, inventory the source's first five visible posts, the destination, and the previous run's local mappings without entering the bot token or resetting Docker:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
-  -Mode 1to1 -ExistingPostOnly -DestinationConfirmedDisposable `
-  -ExistingPostsLimit 4 -SkipSourceMessageId 56 `
+  -Mode 1to1 -InspectCourseOnly `
   -Source '-100SOURCE' -Destinations '-100DEST_A'
 ```
 
-The selector excludes source `56`, selects at most four other standalone text/photo/video/document posts, and skips album members, protected posts and posts with links so that it cannot break an album or leave source links in copied posts. The worker independently enforces the four-post limit before contacting Telegram. It logs one source→destination mapping per new post and `E2E_LIMITED_COPY_PASS new_posts=N`. This is a real Telegram copy to the disposable destination, but the local mapping is not a Production mirror: it does not copy all history, rewrite links, mark the destination READY, or sync later posts. The earlier destination post `9` remains; no deletion occurs. If a failure happens after any copy log or a network failure makes the outcome uncertain, inspect the destination and local DB before attempting another run, because the harness resets the local DB at startup and a blind retry could duplicate messages.
+The inspection prints IDs, media types and link target IDs without lesson text or credentials. If the Reader test account cannot read the destination, it reports this without blocking source inspection. The local Docker DB prints source→destination mappings when available. **Do not retry a copy yet.** The confirmed TEST destination `-1004492904064` has source `56`→destination `9` from the first smoke and four recorded mappings `38`→`10`, `39`→`11`, `44`→`12`, `55`→`13`. The one-time repair checks these exact rows and the TEST bot identity before deleting destination posts `13,12,11,10,9`. It refuses to delete anything if the old DB changed or has ambiguous work; source messages and other destination posts remain untouched. If cleanup fails midway, stop and reconcile the reported IDs before another run.
+
+The first five visible source posts were identified as `2,3,4,5,7`: two standalone videos, two album-marked videos, and a linked photo. The preflight also verifies that `4` and `5` belong to the same complete album. After it succeeds, run the one-time repair and copy a **prefix of no more than five posts** in ascending source ID order:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
+  -Mode 1to1 -ExistingPostOnly -CoursePrefix -ExistingPostsLimit 5 `
+  -RepairKnownTestCopies `
+  -DestinationConfirmedDisposable `
+  -Source '-1003535777660' -Destinations '-1004492904064'
+```
+
+The source preflight runs **before** the bot token prompt and before the one-time cleanup or Docker reset. It stops on protected or unsupported posts, keeps whole albums together, and never skips a lesson to select a later one. If the fifth photo's link points beyond the selected prefix or is an unverified Telegram link, the plan stops after videos `2,3,4,5` (four Telegram posts, including the intact album). If its internal link points to one of the selected posts, the worker copies five and rewrites the photo caption link to its mapped destination post; normal external web links stay as written. The TEST bot then deletes only the five known out-of-order copies; a mismatch stops before deletion. The worker caps the replacement at five posts, serializes by ascending source ID and checks that destination IDs increase in that order. The source stays read-only. This local E2E does not mark the destination READY or sync future posts. If a failure happens after the bot was contacted, inspect destination and mappings before any retry.
 
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
