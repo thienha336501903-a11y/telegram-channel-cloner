@@ -40,7 +40,7 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
   -Source '-100SOURCE' -Destinations '-100DEST_A'
 ```
 
-Enter the TEST bot token and the Reader API ID/hash locally. This run uses its own `telegram-cloner-e2e-reader` session, not a Reader Manager session. Telethon may ask for a one-time login code if the E2E session does not exist. No token, hash or code belongs in chat. `E2E_EXISTING_TEXT_COPY_PASS` reports the original and destination message IDs; `E2E_EXISTING_TEXT_COPY_AUTOMATED_PASS` means the Bot API copy and durable local mapping succeeded. Manually open destination A and compare the copied text. This is a **copy-only smoke**, not a READY/fidelity or live catch-up gate.
+Enter the TEST bot token locally. If the same Windows user already has Reader Manager (`%LOCALAPPDATA%\YeuNauAnReader\reader-manager.dat`) or the older Reader CLI secrets file, the harness decrypts only the Telegram app API ID/hash locally and does not prompt for them. It does not reuse a Reader Manager Telegram session, agent token or Production ingest secret. Otherwise it prompts for the API ID/hash; Telegram issues those app credentials through [API development tools](https://my.telegram.org). This run uses its own `telegram-cloner-e2e-reader` session. Telethon may ask for a one-time login code if the E2E session does not exist. No token, hash or code belongs in chat. `E2E_EXISTING_TEXT_COPY_PASS` reports the original and destination message IDs; `E2E_EXISTING_TEXT_COPY_AUTOMATED_PASS` means the Bot API copy and durable local mapping succeeded. Manually open destination A and compare the copied text. This is a **copy-only smoke**, not a READY/fidelity or live catch-up gate.
 
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
@@ -90,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
   -Destinations '-100DEST_A'
 ```
 
-The full gate prompts locally for the **test bot token** and, if not already present in environment variables, the Reader API ID/hash. Do not paste bot tokens, OTPs, session strings or API hash into ChatGPT.
+The full gate prompts locally for the **test bot token** and uses any API ID/hash already available in the environment or encrypted local Reader configuration. If none are available, it prompts for them. Do not paste bot tokens, OTPs, session strings or API hash into ChatGPT.
 
 The harness keeps the generated local DB credentials and Reader variables in the same process and automatically runs `verify_telegram.py` immediately after the DB/Bot worker gate. Do not launch a second verifier command from a new PowerShell process.
 

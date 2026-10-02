@@ -32,6 +32,64 @@ function Read-PlainSecret([string]$Prompt) {
   finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 
+function Import-LocalReaderApiCredentials {
+  if ($env:TELEGRAM_API_ID -and $env:TELEGRAM_API_HASH) { return }
+
+  # Reader Manager stores only this machine's configuration under the current
+  # Windows user's DPAPI key. Extract the app ID/hash, never its agent token or
+  # Telegram StringSession; this E2E uses a separate local Telethon session.
+  $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [Environment]::GetFolderPath('LocalApplicationData') }
+  $managerData = Join-Path (Join-Path $localAppData 'YeuNauAnReader') 'reader-manager.dat'
+  if (Test-Path -LiteralPath $managerData) {
+    $env:TGCLONER_E2E_READER_MANAGER_DIR = Join-Path $RepoRoot 'reader-manager'
+    try {
+      $readCredentials = @'
+import json, os, sys
+sys.path.insert(0, os.environ['TGCLONER_E2E_READER_MANAGER_DIR'])
+from reader_manager_storage import load_config
+config = load_config()
+print(json.dumps({'api_id': str(config.get('telegram_api_id') or ''), 'api_hash': str(config.get('telegram_api_hash') or '')}))
+'@
+      $rawCredentials = & python -c $readCredentials
+      if ($LASTEXITCODE -ne 0) { throw 'Reader Manager DPAPI could not be decrypted by this Windows user.' }
+      $credentials = $rawCredentials | ConvertFrom-Json
+      if ([string]$credentials.api_id -match '^\d+$' -and [string]$credentials.api_hash -match '^[0-9a-fA-F]{32}$') {
+        $env:TELEGRAM_API_ID = [string]$credentials.api_id
+        $env:TELEGRAM_API_HASH = [string]$credentials.api_hash
+        Write-Host 'E2E_READER_API_CREDENTIALS_LOADED source=local_reader_manager'
+        return
+      }
+    }
+    catch { Write-Warning 'Cannot read local Reader Manager API credentials for this Windows user.' }
+    finally { Remove-Item Env:TGCLONER_E2E_READER_MANAGER_DIR -ErrorAction SilentlyContinue }
+  }
+
+  # Older Reader CLI saves the same app credentials with ConvertFrom-SecureString.
+  # Its Production ingest secret is deliberately not read for the isolated E2E.
+  $legacyPath = Join-Path $RepoRoot 'reader-cli\.reader-windows-secrets.json'
+  if (Test-Path -LiteralPath $legacyPath) {
+    try {
+      $saved = Get-Content -Raw -LiteralPath $legacyPath | ConvertFrom-Json
+      $id = [string]$saved.telegram_api_id
+      $hash = Read-PlainSecretFromDpapi ([string]$saved.telegram_api_hash_dpapi)
+      if ($id -match '^\d+$' -and $hash -match '^[0-9a-fA-F]{32}$') {
+        $env:TELEGRAM_API_ID = $id
+        $env:TELEGRAM_API_HASH = $hash
+        Write-Host 'E2E_READER_API_CREDENTIALS_LOADED source=local_reader_cli'
+        return
+      }
+    }
+    catch { Write-Warning 'Cannot read legacy Reader CLI API credentials for this Windows user.' }
+  }
+}
+
+function Read-PlainSecretFromDpapi([string]$EncryptedValue) {
+  $secure = ConvertTo-SecureString -String $EncryptedValue
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+
 function Invoke-PsqlFile([string]$Path) {
   Get-Content -Raw $Path | docker exec -i tgcloner-e2e-db psql -U postgres -d postgres -v ON_ERROR_STOP=1
   if ($LASTEXITCODE -ne 0) { throw "psql failed: $Path" }
@@ -83,11 +141,15 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is r
 if (-not $SmokeOnly -and -not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required for full Telegram E2E.' }
 
 Remove-Item Env:TELEGRAM_SESSION_STRING -ErrorAction SilentlyContinue
-$env:TELEGRAM_BOT_TOKEN = Read-PlainSecret 'Dán token của BOT TEST (không phải bot Production)'
 if (-not $SmokeOnly) {
-  if (-not $env:TELEGRAM_API_ID) { $env:TELEGRAM_API_ID = Read-Host 'TELEGRAM_API_ID của tài khoản Reader test' }
-  if (-not $env:TELEGRAM_API_HASH) { $env:TELEGRAM_API_HASH = Read-PlainSecret 'TELEGRAM_API_HASH của tài khoản Reader test' }
+  Import-LocalReaderApiCredentials
+  if (-not $env:TELEGRAM_API_ID) { $env:TELEGRAM_API_ID = Read-Host 'Telegram app API ID từ my.telegram.org (không phải bot token)' }
+  if (-not $env:TELEGRAM_API_HASH) { $env:TELEGRAM_API_HASH = Read-PlainSecret 'Telegram app API hash từ my.telegram.org' }
+  if ($env:TELEGRAM_API_ID -notmatch '^\d+$' -or $env:TELEGRAM_API_HASH -notmatch '^[0-9a-fA-F]{32}$') {
+    throw 'Invalid Telegram app API ID/hash. They must come from my.telegram.org or the encrypted local Reader configuration.'
+  }
 }
+$env:TELEGRAM_BOT_TOKEN = Read-PlainSecret 'Dán token của BOT TEST (không phải bot Production)'
 $env:READER_INGEST_SECRET = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
 $env:TELEGRAM_WEBHOOK_SECRET = [guid]::NewGuid().ToString('N')
 $env:SUPABASE_URL = 'http://127.0.0.1:8787'
