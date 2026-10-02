@@ -17,10 +17,13 @@ const destinationChatIds = String(process.env.E2E_DESTINATION_CHAT_IDS || '')
   .split(',').map((value) => value.trim()).filter(Boolean);
 const waitForLatePost = String(process.env.E2E_WAIT_FOR_LATE_POST || '').toLowerCase() === 'true';
 const smokeOnly = String(process.env.E2E_SMOKE_ONLY || '').toLowerCase() === 'true';
+const existingCopyOnly = String(process.env.E2E_EXISTING_COPY_ONLY || '').toLowerCase() === 'true';
 
 if (!sourceChatId) throw new Error('E2E_SOURCE_CHAT_ID is required');
 if (![1, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1 or 3 chat ids');
 if (smokeOnly && destinationChatIds.length !== 1) throw new Error('E2E smoke mode supports exactly one destination');
+if (existingCopyOnly && !smokeOnly) throw new Error('Existing copy requires isolated smoke mode');
+if (destinationChatIds.includes(sourceChatId)) throw new Error('Refusing to copy into the source channel');
 
 async function one(table, query) {
   const rows = await select(table, query);
@@ -107,7 +110,10 @@ if (!smokeOnly) {
   if (messages.some((message) => message.message_type !== 'text')) {
     throw new Error('Smoke source manifest must contain plain text only');
   }
-  console.log(`E2E_SMOKE_MANIFEST source=${source.chat_id} messages=${messages.length}`);
+  if (existingCopyOnly && (messages.length !== 1 || linksForNormalizedMessage(messages[0], source).length)) {
+    throw new Error('Existing copy requires exactly one plain-text post without internal links');
+  }
+  console.log(`${existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
 }
 
 await patch(TABLES.settings, 'singleton=eq.true', { distributor_v2_enabled: true, scheduler_enabled: false }, { returning: false });
@@ -136,6 +142,27 @@ for (const destination of destinations) {
 }
 const runIds = runs.map((run) => run.id);
 console.log(`E2E_MANIFEST_CLOSED source=${source.chat_id} messages=${messages.length} destinations=${runIds.length} H=${highWatermark}`);
+
+if (existingCopyOnly) {
+  let mapping = null;
+  for (let cycle = 0; cycle < 60; cycle += 1) {
+    const rows = await select(TABLES.messageMappings, `select=source_message_id,destination_message_id&run_id=eq.${encodeURIComponent(runIds[0])}&source_message_id=eq.${Number(messages[0].source_message_id)}&status=eq.copied&limit=1`);
+    if (rows?.length) { mapping = rows[0]; break; }
+    const blockers = await unresolvedWork(runIds);
+    if (blockers.length) throw new Error(`Existing copy blocker: ${JSON.stringify(blockers)}`);
+    const claimed = await processClaimed(1);
+    if (!claimed) {
+      await advanceDistributorRun(runIds[0]);
+      await sleep(250);
+    }
+  }
+  const destinationMessageId = Number(mapping?.destination_message_id || 0);
+  if (!Number.isSafeInteger(destinationMessageId) || destinationMessageId <= 0) {
+    throw new Error('Existing source post was not durably mapped to the destination');
+  }
+  console.log(`E2E_EXISTING_TEXT_COPY_PASS source_message_id=${mapping.source_message_id} destination_message_id=${destinationMessageId} destination=${destinationChatIds[0]}`);
+  process.exit(0);
+}
 
 if (waitForLatePost) {
   const expectedBaselineMappings = messages.length * runIds.length;

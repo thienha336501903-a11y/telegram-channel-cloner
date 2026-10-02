@@ -1,5 +1,6 @@
 import { patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
+import { verifyTestBot } from './test-bot-identity.mjs';
 
 const botToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const sourceChatId = String(process.env.E2E_SOURCE_CHAT_ID || '').trim();
@@ -36,11 +37,7 @@ async function localPost(path, headers, payload) {
   return data;
 }
 
-const me = await telegram('getMe');
-const actualUsername = String(me?.username || '').toLowerCase();
-if (!actualUsername || actualUsername !== expectedUsername) {
-  throw new Error(`Refusing smoke E2E: token belongs to @${actualUsername || 'unknown'}, expected @${expectedUsername}`);
-}
+const actualUsername = await verifyTestBot({ token: botToken, expectedUsername });
 console.log(`E2E_TEST_BOT_VERIFIED @${actualUsername}`);
 
 await patch(TABLES.settings, 'singleton=eq.true', { distributor_v2_enabled: true, scheduler_enabled: false }, { returning: false });

@@ -4,6 +4,9 @@ param(
   [Parameter(Mandatory=$true)][string[]]$Destinations,
   [string]$PublicUrl = '',
   [switch]$SmokeOnly,
+  [switch]$ExistingTextOnly,
+  [switch]$DisposableSourceConfirmed,
+  [switch]$DestinationConfirmedDisposable,
   [string]$ExpectedBotUsername = 'yeubep_distributor_test_bot'
 )
 
@@ -15,6 +18,12 @@ if ($Mode -eq '1to1' -and $Destinations.Count -ne 1) { throw 'Mode 1to1 requires
 if ($Mode -eq '1to3' -and $Destinations.Count -ne 3) { throw 'Mode 1to3 requires exactly three destinations.' }
 if ($Mode -eq '1to3' -and -not $PublicUrl) { throw 'Mode 1to3 requires -PublicUrl from a temporary tunnel so the TEST bot can deliver the late-post webhook.' }
 if ($SmokeOnly -and $Mode -ne '1to1') { throw 'SmokeOnly supports Mode 1to1 only.' }
+if ($SmokeOnly -and $ExistingTextOnly) { throw 'Choose either -SmokeOnly or -ExistingTextOnly.' }
+if ($ExistingTextOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingTextOnly supports Mode 1to1 without a webhook tunnel.' }
+if (($SmokeOnly -or $Mode -eq '1to3') -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingTextOnly.' }
+if ($ExistingTextOnly -and -not $DestinationConfirmedDisposable) { throw 'ExistingTextOnly copies one old post to a destination. Confirm that it has no learners with -DestinationConfirmedDisposable.' }
+if (@($Destinations | Where-Object { $_.Trim() -eq $Source.Trim() }).Count -gt 0) { throw 'Source and destination must differ; refusing to post into the source channel.' }
+if ($ExpectedBotUsername.TrimStart('@').ToLowerInvariant() -ne 'yeubep_distributor_test_bot') { throw 'This harness requires @yeubep_distributor_test_bot.' }
 
 function Read-PlainSecret([string]$Prompt) {
   $secure = Read-Host $Prompt -AsSecureString
@@ -73,6 +82,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker Des
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required.' }
 if (-not $SmokeOnly -and -not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required for full Telegram E2E.' }
 
+Remove-Item Env:TELEGRAM_SESSION_STRING -ErrorAction SilentlyContinue
 $env:TELEGRAM_BOT_TOKEN = Read-PlainSecret 'Dán token của BOT TEST (không phải bot Production)'
 if (-not $SmokeOnly) {
   if (-not $env:TELEGRAM_API_ID) { $env:TELEGRAM_API_ID = Read-Host 'TELEGRAM_API_ID của tài khoản Reader test' }
@@ -88,12 +98,17 @@ $env:E2E_SOURCE_CHAT_ID = $Source
 $env:E2E_DESTINATION_CHAT_IDS = ($Destinations -join ',')
 $env:E2E_WAIT_FOR_LATE_POST = if ($Mode -eq '1to3') { 'true' } else { 'false' }
 $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
-$env:E2E_SMOKE_ONLY = if ($SmokeOnly) { 'true' } else { 'false' }
+$env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingTextOnly) { 'true' } else { 'false' }
+$env:E2E_EXISTING_COPY_ONLY = if ($ExistingTextOnly) { 'true' } else { 'false' }
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
 
 Push-Location $RepoRoot
 $server = $null
 try {
+  if (-not $SmokeOnly) {
+    node scripts/e2e-local/verify-test-bot.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Only the dedicated TEST bot can run E2E.' }
+  }
   docker compose -f $Compose down -v --remove-orphans | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
   docker compose -f $Compose up -d db | Out-Null
@@ -145,15 +160,25 @@ try {
       if ($LASTEXITCODE -ne 0) { throw 'Could not set TEST bot webhook.' }
     }
 
-    Write-Host 'Importing source history into isolated local DB. If Telethon asks for login/OTP, complete it locally; do not paste OTP into ChatGPT.'
-    python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader
+    if ($ExistingTextOnly) {
+      Write-Host 'Reading one existing plain-text post into the isolated local DB. No post, edit, pin or delete is made in the source channel.'
+      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --latest-plain-text-only
+    }
+    else {
+      Write-Host 'Importing source history into isolated local DB. If Telethon asks for login/OTP, complete it locally; do not paste OTP into ChatGPT.'
+      python reader-cli/export_history.py --channel $Source --cloner-url http://127.0.0.1:8787 --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Reader import failed.' }
   }
 
   node scripts/e2e-local/run-distributor.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Distributor E2E worker failed.' }
 
-  if ($SmokeOnly) {
+  if ($ExistingTextOnly) {
+    Write-Host 'E2E_EXISTING_TEXT_COPY_AUTOMATED_PASS mode=1to1'
+    Write-Host 'Manual gate: confirm one old text post was copied to the disposable destination. The source channel was not changed.'
+  }
+  elseif ($SmokeOnly) {
     Write-Host 'E2E_SMOKE_AUTOMATED_GATE_PASS mode=1to1'
     Write-Host 'Manual smoke gate: open destination A and confirm the new source text was copied there.'
   }

@@ -1,6 +1,6 @@
 # Distributor V2 — Real Telegram E2E harness
 
-This harness is for **System B test channels only**. It never uses Supabase B Production, the Production bot/webhook, `reader.yeubep.shop`, learner data, or System A.
+The full E2E fixture uses **System B test channels only**. A separate opt-in copy-only check can read one old text post from an owner-controlled source with learners, but writes only to an isolated local DB and a confirmed disposable destination. Neither mode uses Supabase B Production, the Production bot/webhook, `reader.yeubep.shop`, learner records, or System A.
 
 ## What it proves
 
@@ -30,9 +30,21 @@ The harness selects a free loopback port for PostgREST and prints `E2E_POSTGREST
 
 The script sets `TGCLONER_READER_NO_SOURCE_MUTATION=true`. If Reader media metadata is not sufficient, ingestion fails instead of using the legacy self-forward/delete hydration path. The V2 webhook bridge is also opt-in through `DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED=true`; Production remains unchanged unless a later rollout explicitly enables it after migrations/review.
 
+## Copy one existing text post from a source with learners
+
+Use `-ExistingTextOnly` when posting to the source is inappropriate. The Reader Telegram account reads history and selects the newest accessible plain-text post without media or links. The harness indexes that single post in its disposable local DB and uses the verified TEST bot to copy it to destination A. It never sends, edits, pins or deletes a source post, and it does not set or delete a webhook. **Destination A must be disposable and have no learners.**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
+  -Mode 1to1 -ExistingTextOnly -DestinationConfirmedDisposable `
+  -Source '-100SOURCE' -Destinations '-100DEST_A'
+```
+
+Enter the TEST bot token and the Reader API ID/hash locally. This run uses its own `telegram-cloner-e2e-reader` session, not a Reader Manager session. Telethon may ask for a one-time login code if the E2E session does not exist. No token, hash or code belongs in chat. `E2E_EXISTING_TEXT_COPY_PASS` reports the original and destination message IDs; `E2E_EXISTING_TEXT_COPY_AUTOMATED_PASS` means the Bot API copy and durable local mapping succeeded. Manually open destination A and compare the copied text. This is a **copy-only smoke**, not a READY/fidelity or live catch-up gate.
+
 ## Quick 1→1 smoke gate (no Reader API credentials)
 
-For the first real Telegram smoke run, use `-SmokeOnly`. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.
+Use `-SmokeOnly` **only with a disposable source that has no learners**. This intentionally does **not** read or export the encrypted Reader Manager API hash/session. It uses only the dedicated TEST bot and a new plain-text source post.
 
 The smoke script verifies that the supplied token belongs to `@yeubep_distributor_test_bot`. It then clears stale pending updates for that dedicated TEST bot, registers the disposable source against the isolated local DB, and waits for one new plain-text `channel_post` from the source through Bot API `getUpdates`. The captured real Telegram update is sent through the same local webhook handler/V2 event bridge, then the distributor performs an actual Telegram copy to destination A and drives the run to `READY_FOR_NEW`.
 
@@ -41,7 +53,7 @@ From PowerShell at repository root:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
   -Mode 1to1 `
-  -SmokeOnly `
+  -SmokeOnly -DisposableSourceConfirmed `
   -Source '-100SOURCE' `
   -Destinations '-100DEST_A'
 ```
@@ -96,7 +108,7 @@ Use the temporary `https://...trycloudflare.com` URL returned by cloudflared:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/e2e-local/run.ps1 `
-  -Mode 1to3 `
+  -Mode 1to3 -DisposableSourceConfirmed `
   -Source '-100SOURCE' `
   -Destinations '-100DEST_B','-100DEST_C','-100DEST_D' `
   -PublicUrl 'https://TEMP.trycloudflare.com'
