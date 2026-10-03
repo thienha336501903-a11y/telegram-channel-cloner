@@ -4,6 +4,7 @@ import asyncio
 import os
 
 from telethon import TelegramClient
+from telethon.tl.types import InputMessagesFilterPinned
 
 from verify_telegram import resolve_channel, rest, rest_all
 
@@ -18,9 +19,25 @@ async def main():
     if len(sources) != 1:
         raise RuntimeError("Source missing from isolated DB")
     source_id = sources[0]["id"]
+    recover_after_late = os.environ.get("E2E_RECOVER_TWO_AFTER_LATE", "").lower() == "true"
+    baseline_h = int(os.environ.get("E2E_EXPECTED_HIGH_WATERMARK", "0"))
+    expected_count = int(os.environ.get("E2E_EXPECTED_HISTORY_COUNT", "0"))
+    late_id = int(os.environ.get("E2E_EXPECTED_LATE_SOURCE_ID", "0"))
     source_rows = rest_all("tgcloner_source_messages",
-                       f"select=source_message_id&source_id=eq.{source_id}")
+                       f"select=source_message_id,message_type,media_group_id&source_id=eq.{source_id}")
     source_ids = {int(row["source_message_id"]) for row in source_rows}
+    baseline_ids = {message_id for message_id in source_ids if message_id <= baseline_h}
+    if recover_after_late:
+        late = [row for row in source_rows if int(row["source_message_id"]) == late_id]
+        events = rest_all("tgcloner_source_events",
+                          f"select=id,origin,event_kind,source_message_id&source_id=eq.{source_id}")
+        if (len(baseline_ids) != expected_count or max(baseline_ids, default=0) != baseline_h
+                or source_ids != baseline_ids | {late_id} or len(late) != 1
+                or late[0]["message_type"] != "text" or late[0]["media_group_id"]
+                or len(events) != 1 or events[0]["origin"] != "bot_webhook"
+                or events[0]["event_kind"] != "message_new"
+                or int(events[0]["source_message_id"] or 0) != late_id):
+            raise RuntimeError("Isolated source ledger is not the baseline plus one webhook-captured text post")
 
     async with TelegramClient("telegram-cloner-e2e-reader",
                               int(os.environ["TELEGRAM_API_ID"]),
@@ -32,15 +49,25 @@ async def main():
                 raise RuntimeError(f"Isolated destination identity mismatch: {chat_id}")
             destination_id = destination_rows[0]["id"]
             runs = rest("tgcloner_clone_runs",
-                        f"select=id,status,manifest_closed_at&destination_id=eq.{destination_id}")
-            if len(runs) != 1 or runs[0]["status"] != "active" or not runs[0]["manifest_closed_at"]:
+                        f"select=id,status,phase,snapshot_high_watermark,manifest_closed_at&destination_id=eq.{destination_id}")
+            if len(runs) != 1 or runs[0]["status"] != "active" or not runs[0]["manifest_closed_at"] or (
+                    recover_after_late and (int(runs[0]["snapshot_high_watermark"] or 0) != baseline_h
+                                            or runs[0]["phase"] not in (
+                                                "catching_up", "rewriting", "verifying", "ready_for_new"))):
                 raise RuntimeError(f"Isolated run is not safely resumable: {chat_id}")
             run_id = runs[0]["id"]
+            if recover_after_late:
+                manifest = rest_all("tgcloner_clone_manifest",
+                                    f"select=source_message_id&run_id=eq.{run_id}")
+                if {int(row["source_message_id"]) for row in manifest} != baseline_ids or len(manifest) != expected_count:
+                    raise RuntimeError(f"Closed baseline manifest changed: {chat_id}")
             unsafe = rest_all("tgcloner_clone_work",
-                          f"select=id,status,side_effect_state&run_id=eq.{run_id}"
+                          f"select=id,phase,status,side_effect_state&run_id=eq.{run_id}"
                           "&status=in.(blocked_ambiguous,blocked_dependency,failed,leased,retry_wait,queued)")
             if any(row["status"] in ("blocked_ambiguous", "blocked_dependency", "failed", "leased")
-                   or row["side_effect_state"] != "not_started" for row in unsafe):
+                   or row["side_effect_state"] not in ("not_started", "not_applicable")
+                   or (row["side_effect_state"] == "not_applicable" and row["phase"] != "verify")
+                   for row in unsafe):
                 raise RuntimeError(f"Unreconciled work may have Telegram side effects: {chat_id}")
             mappings = rest_all("tgcloner_message_mappings",
                             f"select=source_message_id,destination_message_id,status"
@@ -49,17 +76,36 @@ async def main():
                    int(row["source_message_id"]) not in source_ids or
                    not int(row["destination_message_id"] or 0) for row in mappings):
                 raise RuntimeError(f"Incomplete or foreign mapping in isolated DB: {chat_id}")
+            if recover_after_late:
+                mapped_source_ids = {int(row["source_message_id"]) for row in mappings}
+                if (mapped_source_ids != baseline_ids and mapped_source_ids != source_ids
+                        or len(mappings) != len(mapped_source_ids)):
+                    raise RuntimeError(f"Baseline mappings incomplete or duplicated: {chat_id}")
             mappings.sort(key=lambda row: int(row["source_message_id"]))
             ids = [int(row["destination_message_id"]) for row in mappings]
             if ids != sorted(set(ids)):
                 raise RuntimeError(f"Destination message order or uniqueness mismatch: {chat_id}")
             entity = await resolve_channel(client, chat_id)
+            if recover_after_late:
+                pinned = [message.id async for message in client.iter_messages(
+                    entity, filter=InputMessagesFilterPinned)]
+                if pinned:
+                    raise RuntimeError(f"Unexpected TEST destination pin before recovery: {chat_id}")
             if ids:
                 messages = await client.get_messages(entity, ids=ids)
                 if not isinstance(messages, list):
                     messages = [messages]
                 if {int(message.id) for message in messages if message is not None} != set(ids):
                     raise RuntimeError(f"Mapped Telegram messages were deleted: {chat_id}")
+            if recover_after_late:
+                visible_ids = set()
+                async for message in client.iter_messages(entity):
+                    if not getattr(message, "action", None) and (
+                            str(getattr(message, "raw_text", "") or "").strip()
+                            or getattr(message, "media", None)):
+                        visible_ids.add(int(message.id))
+                if visible_ids != set(ids):
+                    raise RuntimeError(f"Unmapped or missing visible Telegram post: {chat_id}")
             print(f"E2E_1TO2_RESUME_READBACK_PASS destination={chat_id} mapped={len(ids)}")
     print("E2E_1TO2_RESUME_PREFLIGHT_PASS")
 

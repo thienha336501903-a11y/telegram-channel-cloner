@@ -82,6 +82,42 @@ command**: it refuses an existing isolated project. Before the late post has
 been created and while the source inventory is unchanged, use the same
 arguments plus `-ResumeTwoDestination`. That path rereads existing mappings
 from Telegram and blocks ambiguous/armed work before continuing. If the late
-post was already made, the source snapshot has changed, mapped messages were
-deleted, or a webhook cleanup warning appears, stop for reconciliation rather
-than resetting or recopying.
+post was already made, use the guarded recovery below only for the documented
+source message #61. Mapped messages deleted from Telegram, an unexpected post,
+or an uncertain/armed work item still require reconciliation; never reset or
+recopy blindly.
+
+## Continue after the captured late post #61
+
+The first 1→2 run on 2026-10-03 completed its 59-post baseline to both
+destinations and durably captured `bot_webhook` event #1 for new plain-text
+source post #61. It then hit `distributor_run_not_catchup_phase`: the first
+catch-up RPC had advanced a run to `rewriting`, and the repository called the
+phase-limited RPC a second time. The TEST webhook was deleted by `finally`.
+The repository now returns immediately when the first RPC advances beyond
+catch-up. No SQL migration or Vercel deployment is required for this local
+worker fix.
+
+From the updated exact branch HEAD, use direct invocation in the existing
+PowerShell session (PowerShell 5.1 needs this for the destination array):
+
+```powershell
+& .\scripts\e2e-local\run.ps1 `
+  -Mode 1to2 -RecoverTwoAfterLate `
+  -Source '-1004320185488' `
+  -Destinations @('-1003933578709', '-1004492904064') `
+  -ExpectedHistoryCount 59 -ExpectedHighWatermark 60 `
+  -ExpectedInventorySha256 '4ff2094c75792dac943d2874541f5c8a4bd2e0dca465e0fc4993dab4ee5314a3' `
+  -ExpectedLateSourceMessageId 61
+```
+
+This mode requires the live Reader inventory to equal the original 59-post
+SHA plus exactly one plain-text post #61, and the retained local source/event
+ledger to contain exactly that webhook event. It checks both closed manifests,
+all baseline mappings and their Telegram readback, destination post sets,
+work state and TEST webhook absence. It saves a local `pg_dump` checkpoint,
+restarts the retained containers without recreating them, and advances those
+same two runs. It neither imports history nor asks for a new source post, sets
+a webhook, or needs a tunnel. The usual final Telegram verifier checks both
+60-post destinations and prints `E2E_AUTOMATED_GATE_PASS mode=1to2` only after
+READY and readback. Keep the DB and post any failure output for reconciliation.

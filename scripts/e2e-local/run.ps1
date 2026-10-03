@@ -11,10 +11,12 @@ param(
   [switch]$InspectFullCourseOnly,
   [switch]$InspectTwoDestinationOnly,
   [switch]$ResumeTwoDestination,
+  [switch]$RecoverTwoAfterLate,
   [switch]$ResumeCourseFull,
   [int]$ExpectedHistoryCount = 0,
   [long]$ExpectedHighWatermark = 0,
   [string]$ExpectedInventorySha256 = '',
+  [long]$ExpectedLateSourceMessageId = 0,
   [switch]$RepairKnownTestCopies,
   [switch]$DestinationConfirmedEmpty,
   [long]$SkipSourceMessageId = 0,
@@ -30,18 +32,19 @@ $IsolatedTwoDestination = $Mode -eq '1to2'
 $DbContainer = if ($IsolatedTwoDestination) { 'tgcloner-e2e-1to2-db' } else { 'tgcloner-e2e-db' }
 $RestContainer = if ($IsolatedTwoDestination) { 'tgcloner-e2e-1to2-rest' } else { 'tgcloner-e2e-rest' }
 $ComposeProject = if ($IsolatedTwoDestination) { 'tgcloner-e2e-1to2' } else { 'e2e-local' }
+$RetainTwoDestination = $ResumeTwoDestination -or $RecoverTwoAfterLate
 
 if ($Mode -eq '1to1' -and $Destinations.Count -ne 1) { throw 'Mode 1to1 requires exactly one destination.' }
 if ($IsolatedTwoDestination -and $Destinations.Count -ne 2) { throw 'Mode 1to2 requires exactly two destinations.' }
 if ($Mode -eq '1to3' -and $Destinations.Count -ne 3) { throw 'Mode 1to3 requires exactly three destinations.' }
-if ($Mode -in @('1to2','1to3') -and -not $PublicUrl -and -not $InspectTwoDestinationOnly) { throw 'Mode 1to2/1to3 requires -PublicUrl from a temporary tunnel so the TEST bot can deliver the late-post webhook.' }
-if ($IsolatedTwoDestination -and -not $InspectTwoDestinationOnly -and $PublicUrl -notmatch '^https://[a-z0-9-]+\.trycloudflare\.com/?$') {
+if ($Mode -in @('1to2','1to3') -and -not $PublicUrl -and -not $InspectTwoDestinationOnly -and -not $RecoverTwoAfterLate) { throw 'Mode 1to2/1to3 requires -PublicUrl from a temporary tunnel so the TEST bot can deliver the late-post webhook.' }
+if ($IsolatedTwoDestination -and -not $InspectTwoDestinationOnly -and -not $RecoverTwoAfterLate -and $PublicUrl -notmatch '^https://[a-z0-9-]+\.trycloudflare\.com/?$') {
   throw 'The isolated 1to2 pilot accepts only a temporary HTTPS Cloudflare Quick Tunnel URL.'
 }
 if ($SmokeOnly -and $Mode -ne '1to1') { throw 'SmokeOnly supports Mode 1to1 only.' }
 if ($SmokeOnly -and $ExistingPostOnly) { throw 'Choose either -SmokeOnly or -ExistingPostOnly.' }
 if ($ExistingPostOnly -and ($Mode -ne '1to1' -or $PublicUrl)) { throw 'ExistingPostOnly supports Mode 1to1 without a webhook tunnel.' }
-if (($SmokeOnly -or ($Mode -in @('1to2','1to3') -and -not $InspectTwoDestinationOnly)) -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
+if (($SmokeOnly -or ($Mode -in @('1to2','1to3') -and -not $InspectTwoDestinationOnly -and -not $RecoverTwoAfterLate)) -and -not $DisposableSourceConfirmed) { throw 'This mode asks for a new post. Use only a disposable source and add -DisposableSourceConfirmed, or use -ExistingPostOnly.' }
 $destinationPair = (@($Destinations | ForEach-Object { $_.Trim() } | Sort-Object) -join ',')
 if ($IsolatedTwoDestination -and ($Source.Trim() -ne '-1004320185488' -or
     $destinationPair -ne '-1003933578709,-1004492904064')) {
@@ -56,6 +59,10 @@ if ($InspectTwoDestinationOnly -and (-not $IsolatedTwoDestination -or $PublicUrl
 if ($ResumeTwoDestination -and (-not $IsolatedTwoDestination -or $InspectTwoDestinationOnly)) {
   throw 'ResumeTwoDestination is only for an interrupted isolated 1to2 run.'
 }
+if ($RecoverTwoAfterLate -and (-not $IsolatedTwoDestination -or $InspectTwoDestinationOnly -or $ResumeTwoDestination -or $PublicUrl -or $DisposableSourceConfirmed -or $ExpectedLateSourceMessageId -ne 61)) {
+  throw 'Recovery is only for the retained isolated 1to2 DB after exactly source post #61, without a webhook or a new source post.'
+}
+if (-not $RecoverTwoAfterLate -and $ExpectedLateSourceMessageId -ne 0) { throw 'ExpectedLateSourceMessageId is only valid for recovery.' }
 if ($IsolatedTwoDestination -and -not $InspectTwoDestinationOnly -and
     ($ExpectedHistoryCount -lt 1 -or $ExpectedHighWatermark -lt 1 -or $ExpectedInventorySha256 -notmatch '^[0-9a-fA-F]{64}$')) {
   throw '1to2 copy requires the exact count, high watermark and SHA256 from the read-only inventory.'
@@ -224,7 +231,8 @@ if ($IsolatedTwoDestination) {
         '--expected-high-watermark', [string]$ExpectedHighWatermark,
         '--expected-sha256', $ExpectedInventorySha256)
     }
-    if ($ResumeTwoDestination) { $twoArgs += '--resume' }
+    if ($RetainTwoDestination) { $twoArgs += '--resume' }
+    if ($RecoverTwoAfterLate) { $twoArgs += @('--recover-after-late', '--expected-late-source-id', [string]$ExpectedLateSourceMessageId) }
     & python @twoArgs
     if ($LASTEXITCODE -ne 0) { throw 'Read-only 1to2 preflight failed. No TEST destination was changed.' }
   }
@@ -286,13 +294,13 @@ if ($CoursePrefix) {
 if ($IsolatedTwoDestination) {
   $existingStack = @(docker ps -a --filter "label=com.docker.compose.project=$ComposeProject" --format '{{.ID}}')
   if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the isolated Docker project; no TEST bot call started.' }
-  if ($ResumeTwoDestination -and $existingStack.Count -ne 2) {
+  if ($RetainTwoDestination -and $existingStack.Count -ne 2) {
     throw 'The isolated 1to2 DB and REST containers must both exist for a safe resume. Preserve the project for reconciliation.'
   }
-  if (-not $ResumeTwoDestination -and $existingStack.Count -gt 0) {
+  if (-not $RetainTwoDestination -and $existingStack.Count -gt 0) {
     throw 'The isolated 1to2 DB already exists. Preserve it and reconcile before rerunning; no Docker reset or Telegram copy started.'
   }
-  if ($ResumeTwoDestination) {
+  if ($RetainTwoDestination) {
     foreach ($name in @($DbContainer, $RestContainer)) {
       $projectLabel = docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' $name
       if ($LASTEXITCODE -ne 0 -or $projectLabel.Trim() -ne $ComposeProject) {
@@ -322,7 +330,7 @@ $env:TGCLONER_READER_NO_SOURCE_MUTATION = 'true'
 $env:DISTRIBUTOR_V2_EVENT_BRIDGE_ENABLED = 'true'
 $env:E2E_SOURCE_CHAT_ID = $Source
 $env:E2E_DESTINATION_CHAT_IDS = ($Destinations -join ',')
-$env:E2E_WAIT_FOR_LATE_POST = if ($Mode -in @('1to2','1to3')) { 'true' } else { 'false' }
+$env:E2E_WAIT_FOR_LATE_POST = if ($Mode -in @('1to2','1to3') -and -not $RecoverTwoAfterLate) { 'true' } else { 'false' }
 $env:E2E_PUBLIC_URL = $PublicUrl.TrimEnd('/')
 $env:E2E_SMOKE_ONLY = if ($SmokeOnly -or $ExistingPostOnly -or $ResumeCourseFull) { 'true' } else { 'false' }
 $env:E2E_EXISTING_COPY_ONLY = if ($ExistingPostOnly -or $ResumeCourseFull) { 'true' } else { 'false' }
@@ -330,7 +338,10 @@ $env:E2E_EXISTING_MAX_COPIES = if ($ResumeCourseFull) { [string]$ExpectedHistory
 $env:E2E_RESUME_COURSE_FULL = if ($ResumeCourseFull) { 'true' } else { 'false' }
 $env:E2E_TWO_DESTINATION_PILOT = if ($IsolatedTwoDestination) { 'true' } else { 'false' }
 $env:E2E_RESUME_TWO_DESTINATION = if ($ResumeTwoDestination) { 'true' } else { 'false' }
+$env:E2E_RECOVER_TWO_AFTER_LATE = if ($RecoverTwoAfterLate) { 'true' } else { 'false' }
 $env:E2E_EXPECTED_HIGH_WATERMARK = [string]$ExpectedHighWatermark
+$env:E2E_EXPECTED_HISTORY_COUNT = [string]$ExpectedHistoryCount
+$env:E2E_EXPECTED_LATE_SOURCE_ID = [string]$ExpectedLateSourceMessageId
 $env:E2E_EXISTING_COURSE_PREFIX = if ($CoursePrefix) { 'true' } else { 'false' }
 $env:E2E_EXISTING_EXCLUDED_SOURCE_ID = [string]$SkipSourceMessageId
 $env:E2E_EXPECTED_TEST_BOT_USERNAME = $ExpectedBotUsername.TrimStart('@')
@@ -368,7 +379,7 @@ try {
       docker compose -p $ComposeProject -f $Compose down -v --remove-orphans | Out-Null
       if ($LASTEXITCODE -ne 0) { throw 'Could not reset disposable local E2E containers.' }
     }
-    if ($ResumeTwoDestination) {
+    if ($RetainTwoDestination) {
       # Never let Compose recreate a container whose PostgreSQL data lives in
       # that container. Its local copy ledger must survive any interruption.
       docker start $DbContainer | Out-Null
@@ -386,7 +397,7 @@ try {
     if ($i -eq 39) { throw 'Local PostgreSQL did not become ready.' }
   }
 
-  if (-not $ResumeCourseFull -and -not $ResumeTwoDestination) {
+  if (-not $ResumeCourseFull -and -not $RetainTwoDestination) {
     Invoke-PsqlFile (Join-Path $PSScriptRoot 'bootstrap.sql')
     Invoke-PsqlFile (Join-Path $RepoRoot 'sql\002_shared_supabase_tgcloner_schema.sql')
     foreach ($n in 10..16) {
@@ -396,9 +407,9 @@ try {
     }
     Invoke-PsqlFile (Join-Path $PSScriptRoot 'permissions.sql')
   }
-  $env:E2E_POSTGREST_PORT = if ($ResumeTwoDestination) { $retainedPostgrestPort } else { [string](Get-FreeLoopbackPort) }
+  $env:E2E_POSTGREST_PORT = if ($RetainTwoDestination) { $retainedPostgrestPort } else { [string](Get-FreeLoopbackPort) }
   Write-Host "E2E_POSTGREST_PORT $env:E2E_POSTGREST_PORT"
-  if ($ResumeTwoDestination) {
+  if ($RetainTwoDestination) {
     docker start $RestContainer | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Retained isolated PostgREST container did not start.' }
   }
@@ -429,7 +440,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Smoke source capture failed.' }
   }
   else {
-    if ($ResumeTwoDestination) {
+    if ($RetainTwoDestination) {
       python scripts/e2e-local/verify-two-resume.py
       if ($LASTEXITCODE -ne 0) { throw 'Isolated 1to2 resume reconciliation failed; no TEST bot webhook or destination write started.' }
     }
@@ -439,7 +450,10 @@ try {
       $webhookSetByThisRun = $true
     }
 
-    if ($ResumeCourseFull) {
+    if ($RecoverTwoAfterLate) {
+      Write-Host 'Using retained source rows and captured TEST webhook event #61. No Reader import, new post or webhook setup.'
+    }
+    elseif ($ResumeCourseFull) {
       Write-Host "Reading $ExpectedHistoryCount existing posts into the retained local DB. The source channel is read-only; the TEST destination receives copies."
       python reader-cli/export_history.py --channel $Source --cloner-url $env:SUPABASE_URL --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader --local-full-copy-only --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256
     }
@@ -460,15 +474,26 @@ try {
       Write-Host 'Importing source history into isolated local DB. If Telethon asks for login/OTP, complete it locally; do not paste OTP into ChatGPT.'
       python reader-cli/export_history.py --channel $Source --cloner-url $env:SUPABASE_URL --ingest-secret $env:READER_INGEST_SECRET --session telegram-cloner-e2e-reader
     }
-    if ($LASTEXITCODE -ne 0) { throw 'Reader import failed.' }
-    if ($ResumeCourseFull -or $IsolatedTwoDestination) {
+    if (-not $RecoverTwoAfterLate -and $LASTEXITCODE -ne 0) { throw 'Reader import failed.' }
+    if (-not $RecoverTwoAfterLate -and ($ResumeCourseFull -or $IsolatedTwoDestination)) {
       python scripts/e2e-local/inventory-course.py --source $Source --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256
       if ($LASTEXITCODE -ne 0) { throw 'Source changed during local import; no TEST destination copy was started.' }
     }
-    if ($IsolatedTwoDestination -and -not $ResumeTwoDestination) {
+    if ($IsolatedTwoDestination -and -not $RetainTwoDestination) {
       python scripts/e2e-local/inspect-two-destinations.py --source $Source --destination $Destinations[0] --destination $Destinations[1] --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256
       if ($LASTEXITCODE -ne 0) { throw 'A TEST destination changed during import; no destination copy was started.' }
     }
+  }
+
+  if ($RecoverTwoAfterLate) {
+    $backupDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'YeuNauAnReader\E2EBackups'
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $backupPath = Join-Path $backupDir ('before-1to2-late-recovery-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.dump')
+    docker exec $DbContainer pg_dump -U postgres -d postgres -Fc -f /tmp/tgcloner-e2e-1to2-before-recovery.dump
+    if ($LASTEXITCODE -ne 0) { throw 'Could not checkpoint the retained isolated DB; no recovery worker started.' }
+    docker cp "${DbContainer}:/tmp/tgcloner-e2e-1to2-before-recovery.dump" $backupPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupPath)) { throw 'Could not save the recovery checkpoint; no worker started.' }
+    Write-Host "E2E_1TO2_RECOVERY_DB_CHECKPOINT $backupPath"
   }
 
   node scripts/e2e-local/run-distributor.mjs
@@ -495,6 +520,10 @@ try {
     Write-Host 'DB + Bot API worker gate finished. Running read-only Telegram verifier in the same process environment.'
     python scripts/e2e-local/verify_telegram.py
     if ($LASTEXITCODE -ne 0) { throw 'Telegram read-only verification failed.' }
+    if ($RecoverTwoAfterLate) {
+      python scripts/e2e-local/inspect-two-destinations.py --source $Source --destination $Destinations[0] --destination $Destinations[1] --resume --recover-after-late --expected-count $ExpectedHistoryCount --expected-high-watermark $ExpectedHighWatermark --expected-sha256 $ExpectedInventorySha256 --expected-late-source-id $ExpectedLateSourceMessageId
+      if ($LASTEXITCODE -ne 0) { throw 'Source changed during recovery; do not report an automated gate PASS.' }
+    }
 
     Write-Host "E2E_AUTOMATED_GATE_PASS mode=$Mode"
     Write-Host 'Manual gate remains: play the short video and open the rewritten TOC links in the Telegram app.'

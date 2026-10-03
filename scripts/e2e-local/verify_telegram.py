@@ -110,6 +110,15 @@ async def main():
             by_id = {int(msg.id): msg for msg in fetched if msg is not None}
             if len(by_id) != len(ids):
                 raise RuntimeError(f'{destination_chat}: some mapped Telegram messages cannot be read')
+            if TWO_DESTINATION_PILOT:
+                visible_ids = set()
+                async for message in client.iter_messages(entity):
+                    if not getattr(message, 'action', None) and (
+                            str(getattr(message, 'raw_text', '') or '').strip()
+                            or getattr(message, 'media', None)):
+                        visible_ids.add(int(message.id))
+                if visible_ids != set(ids):
+                    raise RuntimeError(f'{destination_chat}: visible posts differ from the mapped course')
 
             groups = {}
             for row in source_messages:
