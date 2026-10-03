@@ -50,3 +50,33 @@ test('local E2E proxy maps Supabase REST reads and writes to root PostgREST rout
     { method: 'PATCH', url: '/tgcloner_settings?singleton=eq.true', apiKey, body: '{"distributor_v2_enabled":true}' }
   ]);
 });
+
+test('local E2E proxy rejects a request path that could change its upstream host', async () => {
+  const apiKey = 'local-test-key';
+  let unexpectedRequests = 0;
+  const sentinel = await listen((req, res) => {
+    unexpectedRequests += 1;
+    res.end('unexpected');
+  });
+  const upstream = await listen((req, res) => {
+    res.end('local');
+  });
+  const proxy = await listen(createPostgrestProxy(upstream, apiKey));
+  const sentinelHost = new URL(sentinel).host;
+
+  async function rawStatus(path) {
+    return new Promise((resolve, reject) => {
+      const request = http.request(proxy, { path, headers: { apikey: apiKey } }, (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+  }
+
+  assert.equal(await rawStatus(`/rest/v1http://${sentinelHost}/unexpected`), 400);
+  assert.equal(await rawStatus(`/rest/v1//${sentinelHost}/unexpected`), 400);
+  assert.equal(unexpectedRequests, 0);
+  assert.throws(() => createPostgrestProxy(sentinel.replace('127.0.0.1', '169.254.169.254'), apiKey), /loopback/);
+});

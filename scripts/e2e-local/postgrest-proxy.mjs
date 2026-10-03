@@ -6,6 +6,10 @@ import { timingSafeEqual } from 'node:crypto';
 export function createPostgrestProxy(upstreamOrigin, apiKey) {
   if (!apiKey) throw new Error('Local E2E REST proxy requires a run-specific API key');
   const upstream = new URL(upstreamOrigin);
+  if (upstream.protocol !== 'http:' || upstream.hostname !== '127.0.0.1' || !upstream.port ||
+      upstream.username || upstream.password || upstream.pathname !== '/' || upstream.search || upstream.hash) {
+    throw new Error('Local E2E REST upstream must be a loopback PostgREST origin');
+  }
   const expected = Buffer.from(apiKey);
   return function proxyPostgrest(req, res) {
     const supplied = Buffer.from(String(req.headers.apikey || ''));
@@ -14,11 +18,26 @@ export function createPostgrestProxy(upstreamOrigin, apiKey) {
       res.end(JSON.stringify({ code: 'E2E_REST_UNAUTHORIZED' }));
       return;
     }
-    const path = (req.url || '').slice('/rest/v1'.length);
-    const target = new URL(path, upstream);
-    const request = http.request(target, {
+    const url = String(req.url || '');
+    const prefix = '/rest/v1';
+    if (url !== prefix && !url.startsWith(`${prefix}/`) && !url.startsWith(`${prefix}?`)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'E2E_REST_INVALID_PATH' }));
+      return;
+    }
+    const suffix = url.slice(prefix.length);
+    if (suffix.startsWith('//')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'E2E_REST_INVALID_PATH' }));
+      return;
+    }
+    const path = suffix.startsWith('?') ? `/${suffix}` : suffix || '/';
+    const request = http.request({
+      hostname: '127.0.0.1',
+      port: Number(upstream.port),
+      path,
       method: req.method,
-      headers: { ...req.headers, host: target.host }
+      headers: { ...req.headers, host: upstream.host }
     }, (response) => {
       res.writeHead(response.statusCode || 502, response.headers);
       response.pipe(res);
