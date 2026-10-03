@@ -302,8 +302,13 @@ if ($IsolatedTwoDestination) {
   }
   if ($RetainTwoDestination) {
     foreach ($name in @($DbContainer, $RestContainer)) {
-      $projectLabel = docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' $name
-      if ($LASTEXITCODE -ne 0 -or $projectLabel.Trim() -ne $ComposeProject) {
+      # PowerShell 5.1 strips the inner quotes from Go template index calls.
+      # Read JSON first so the dotted Compose label remains an ordinary key.
+      $labelsJson = docker inspect --format '{{json .Config.Labels}}' $name
+      if ($LASTEXITCODE -ne 0) { throw "Cannot inspect retained container $name" }
+      $labels = $labelsJson | ConvertFrom-Json
+      $projectLabel = if ($labels) { $labels.PSObject.Properties['com.docker.compose.project'] } else { $null }
+      if (-not $projectLabel -or [string]$projectLabel.Value -ne $ComposeProject) {
         throw "Cannot safely resume unrecognized container $name"
       }
     }
