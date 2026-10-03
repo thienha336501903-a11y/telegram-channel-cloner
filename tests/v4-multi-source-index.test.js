@@ -10,7 +10,8 @@ assert.match(repository, /select=\*&chat_id=eq\./);
 const webhook = read('api/telegram/webhook.js');
 assert.match(webhook, /getSourceByChatId/);
 assert.match(webhook, /if \(!source\?\.active\) return/);
-assert.match(webhook, /indexed: true, mirrored: Boolean\(source\.active\)/);
+assert.match(webhook, /indexed:\s*true/);
+assert.match(webhook, /mirrored:\s*Boolean\(source\.active\)/);
 assert.doesNotMatch(webhook, /getActiveSourceByChatId/);
 
 const edge = read('supabase/functions/tgcloner-telegram-webhook/index.ts');
