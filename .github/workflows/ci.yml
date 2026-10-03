@@ -78,12 +78,22 @@ jobs:
             -f tests/distributor-index-pin.integration.sql
       - name: JavaScript syntax
         run: npm run check
+      - name: Isolated E2E harness syntax and Docker configuration
+        run: |
+          node --check scripts/e2e-local/run-distributor.mjs
+          node --check scripts/e2e-local/set-webhook.mjs
+          node --check scripts/e2e-local/verify-two-test-bot-access.mjs
+          E2E_DB_CONTAINER_NAME=tgcloner-e2e-1to2-db \
+          E2E_REST_CONTAINER_NAME=tgcloner-e2e-1to2-rest \
+          E2E_DB_HOST_PORT=55555 E2E_POSTGREST_PORT=55556 \
+            docker compose -p tgcloner-e2e-1to2 -f scripts/e2e-local/docker-compose.yml config > /dev/null
       - name: Clone configuration isolation
         run: npm run check:clone
       - name: Python syntax
         run: |
           python -m py_compile reader-cli/export_history.py
           python -m py_compile reader-cli/course_full.py scripts/e2e-local/inventory-course.py
+          python -m py_compile scripts/e2e-local/inspect-two-destinations.py scripts/e2e-local/verify-two-resume.py scripts/e2e-local/verify_telegram.py
           python -m py_compile reader-cli/reconcile_history.py
           python -m py_compile reader-cli/reader_agent.py
           python -m py_compile reader-cli/mirror_v5_r2.py

@@ -13,12 +13,23 @@ SOURCE_CHAT = os.getenv('E2E_SOURCE_CHAT_ID', '').strip()
 DEST_CHATS = [x.strip() for x in os.getenv('E2E_DESTINATION_CHAT_IDS', '').split(',') if x.strip()]
 API_ID = int(os.getenv('TELEGRAM_API_ID', '0') or 0)
 API_HASH = os.getenv('TELEGRAM_API_HASH', '').strip()
+TWO_DESTINATION_PILOT = os.getenv('E2E_TWO_DESTINATION_PILOT', '').lower() == 'true'
 
 
 def rest(table, query):
     response = requests.get(f'{BASE}/rest/v1/{table}?{query}', headers={'apikey': APIKEY}, timeout=30)
     response.raise_for_status()
     return response.json()
+
+
+def rest_all(table, query):
+    rows = []
+    for offset in range(0, 100001, 500):
+        page = rest(table, f'{query}&limit=500&offset={offset}')
+        rows.extend(page)
+        if len(page) < 500:
+            return rows
+    raise RuntimeError(f'Isolated {table} exceeds the 100000-row safety cap')
 
 
 def mtproto_id(bot_chat_id):
@@ -60,11 +71,11 @@ async def main():
     if not sources:
         raise RuntimeError('Source row missing from isolated DB')
     source = sources[0]
-    source_messages = rest('tgcloner_source_messages', f'select=*&source_id=eq.{source["id"]}&order=source_message_id.asc')
+    source_messages = rest_all('tgcloner_source_messages', f'select=*&source_id=eq.{source["id"]}&order=source_message_id.asc') if TWO_DESTINATION_PILOT else rest('tgcloner_source_messages', f'select=*&source_id=eq.{source["id"]}&order=source_message_id.asc')
     source_by_db = {row['id']: row for row in source_messages}
     source_private = str(source.get('private_link_id') or '')
     source_username = str(source.get('username') or '').lstrip('@').lower()
-    links = rest('tgcloner_internal_links', f'select=*&source_id=eq.{source["id"]}')
+    links = rest_all('tgcloner_internal_links', f'select=*&source_id=eq.{source["id"]}') if TWO_DESTINATION_PILOT else rest('tgcloner_internal_links', f'select=*&source_id=eq.{source["id"]}')
 
     async with TelegramClient('telegram-cloner-e2e-reader', API_ID, API_HASH) as client:
         source_entity = await resolve_channel(client, SOURCE_CHAT)
@@ -78,10 +89,18 @@ async def main():
             if not destination_rows:
                 raise RuntimeError(f'Destination row missing: {destination_chat}')
             destination = destination_rows[0]
-            mappings = rest('tgcloner_message_mappings', f'select=*&destination_id=eq.{destination["id"]}&status=eq.copied&order=source_message_id.asc')
+            mapping_query = f'select=*&destination_id=eq.{destination["id"]}&status=eq.copied&order=source_message_id.asc'
+            mappings = rest_all('tgcloner_message_mappings', mapping_query) if TWO_DESTINATION_PILOT else rest('tgcloner_message_mappings', mapping_query)
             map_by_source = {int(row['source_message_id']): int(row['destination_message_id']) for row in mappings}
             if len(map_by_source) < len(source_messages):
                 raise RuntimeError(f'{destination_chat}: incomplete mappings {len(map_by_source)}/{len(source_messages)}')
+            if TWO_DESTINATION_PILOT:
+                source_ids = [int(row['source_message_id']) for row in source_messages]
+                if len(mappings) != len(source_ids) or set(map_by_source) != set(source_ids):
+                    raise RuntimeError(f'{destination_chat}: mappings differ from the source manifest')
+                destination_ids = [map_by_source[source_id] for source_id in source_ids]
+                if destination_ids != sorted(set(destination_ids)):
+                    raise RuntimeError(f'{destination_chat}: posts are not in ascending source order')
 
             entity = await resolve_channel(client, destination_chat)
             ids = list(map_by_source.values())
@@ -103,16 +122,30 @@ async def main():
                 if None in dest_group_ids or len(dest_group_ids) != 1:
                     raise RuntimeError(f'{destination_chat}: album grouping mismatch for source {source_ids}')
 
-            for row in source_messages:
-                if row.get('message_type') != 'video':
-                    continue
+            video_rows = [row for row in source_messages if row.get('message_type') == 'video']
+            sample_ids = ({int(video_rows[0]['source_message_id']),
+                           int(video_rows[-1]['source_message_id'])}
+                          if TWO_DESTINATION_PILOT and video_rows else set())
+            for row in video_rows:
                 msg = by_id[map_by_source[int(row['source_message_id'])]]
                 mime = str(getattr(getattr(msg, 'document', None), 'mime_type', '') or '')
                 if not getattr(msg, 'video', None) and not mime.startswith('video/'):
                     raise RuntimeError(f'{destination_chat}: mapped video is not a Telegram video/document')
-                data = await client.download_media(msg, file=bytes)
-                if not data:
-                    raise RuntimeError(f'{destination_chat}: mapped video media cannot be downloaded/read')
+                if TWO_DESTINATION_PILOT:
+                    if int(row['source_message_id']) in sample_ids:
+                        stream = client.iter_download(msg.media, request_size=65536, limit=1)
+                        try:
+                            data = await stream.__anext__()
+                        finally:
+                            await stream.close()
+                        if not data:
+                            raise RuntimeError(f'{destination_chat}: sampled video bytes cannot be read')
+                else:
+                    data = await client.download_media(msg, file=bytes)
+                    if not data:
+                        raise RuntimeError(f'{destination_chat}: mapped video media cannot be downloaded/read')
+            if TWO_DESTINATION_PILOT:
+                print(f'E2E_1TO2_VIDEO_READBACK_SAMPLE {destination_chat} sampled={len(sample_ids)} total={len(video_rows)}')
 
             for link in links:
                 container = source_by_db.get(link['source_message_db_id'])

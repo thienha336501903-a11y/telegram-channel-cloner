@@ -24,16 +24,22 @@ const smokeOnly = String(process.env.E2E_SMOKE_ONLY || '').toLowerCase() === 'tr
 const existingCopyOnly = String(process.env.E2E_EXISTING_COPY_ONLY || '').toLowerCase() === 'true';
 const coursePrefix = String(process.env.E2E_EXISTING_COURSE_PREFIX || '').toLowerCase() === 'true';
 const resumeFull = String(process.env.E2E_RESUME_COURSE_FULL || '').toLowerCase() === 'true';
+const twoDestinationPilot = String(process.env.E2E_TWO_DESTINATION_PILOT || '').toLowerCase() === 'true';
+const resumeTwo = String(process.env.E2E_RESUME_TWO_DESTINATION || '').toLowerCase() === 'true';
 const maxExistingCopies = Number(process.env.E2E_EXISTING_MAX_COPIES || 1);
 const excludedSourceId = Number(process.env.E2E_EXISTING_EXCLUDED_SOURCE_ID || 0);
 
 if (!sourceChatId) throw new Error('E2E_SOURCE_CHAT_ID is required');
-if (![1, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1 or 3 chat ids');
+if (![1, 2, 3].includes(destinationChatIds.length)) throw new Error('E2E_DESTINATION_CHAT_IDS must contain exactly 1, 2 or 3 chat ids');
 if (smokeOnly && destinationChatIds.length !== 1) throw new Error('E2E smoke mode supports exactly one destination');
 if (existingCopyOnly && !smokeOnly) throw new Error('Existing copy requires isolated smoke mode');
 if (existingCopyOnly && (!Number.isSafeInteger(maxExistingCopies) || maxExistingCopies < 1 || maxExistingCopies > (resumeFull ? 100000 : coursePrefix ? 5 : 1))) throw new Error('Existing copy cap is invalid');
 if (coursePrefix && (!existingCopyOnly || excludedSourceId)) throw new Error('Chronological course copy cannot skip any source post');
 if (resumeFull && (coursePrefix || !existingCopyOnly || !smokeOnly || destinationChatIds.length !== 1 || sourceChatId !== COURSE_SOURCE || destinationChatIds[0] !== COURSE_DESTINATION)) throw new Error('Full course resume is restricted to the confirmed TEST pair');
+if (destinationChatIds.length === 2 && !twoDestinationPilot) throw new Error('Two destinations require the isolated 1to2 pilot');
+if (twoDestinationPilot && (smokeOnly || existingCopyOnly || !waitForLatePost || sourceChatId !== '-1004320185488' ||
+  [...destinationChatIds].sort().join(',') !== '-1003933578709,-1004492904064')) throw new Error('Isolated 1to2 pilot identity mismatch');
+if (resumeTwo && !twoDestinationPilot) throw new Error('1to2 resume requires the isolated pilot');
 if (destinationChatIds.includes(sourceChatId)) throw new Error('Refusing to copy into the source channel');
 
 async function one(table, query) {
@@ -69,8 +75,12 @@ async function unresolvedWork(runIds) {
 async function mappingCount(runIds) {
   let total = 0;
   for (const runId of runIds) {
-    const rows = await select(TABLES.messageMappings, `select=id&run_id=eq.${encodeURIComponent(runId)}`);
-    total += rows?.length || 0;
+    if (twoDestinationPilot) {
+      total += await count(TABLES.messageMappings, `run_id=eq.${encodeURIComponent(runId)}&status=eq.copied`);
+    } else {
+      const rows = await select(TABLES.messageMappings, `select=id&run_id=eq.${encodeURIComponent(runId)}`);
+      total += rows?.length || 0;
+    }
   }
   return total;
 }
@@ -88,7 +98,7 @@ async function processClaimed(limit, { allowedPhase = null } = {}) {
 }
 
 async function driveToReady(runIds) {
-  for (let cycle = 0; cycle < 360; cycle += 1) {
+  for (let cycle = 0; cycle < (twoDestinationPilot ? 3600 : 360); cycle += 1) {
     const blockers = await unresolvedWork(runIds);
     if (blockers.length) throw new Error(`Distributor blocker: ${JSON.stringify(blockers)}`);
 
@@ -99,6 +109,9 @@ async function driveToReady(runIds) {
     }
     if (!claimed) {
       for (const run of current) await advanceDistributorRun(run.id);
+      if (twoDestinationPilot && cycle % 20 === 0) {
+        console.log('E2E_1TO2_READY_PROGRESS', JSON.stringify(current.map((run) => ({ id: run.id, phase: run.phase }))));
+      }
       await sleep(500);
     }
   }
@@ -107,11 +120,11 @@ async function driveToReady(runIds) {
 
 const source = await one(TABLES.sources, `select=*&chat_id=eq.${encodeURIComponent(sourceChatId)}&limit=1`);
 if (!source) throw new Error(smokeOnly ? 'Source not found in isolated DB. Smoke source capture must run first.' : 'Source not found in isolated DB. Run Reader import first.');
-if (resumeFull && source.active) throw new Error('The local TEST source unexpectedly has MASTER status');
+if ((resumeFull || twoDestinationPilot) && source.active) throw new Error('The local TEST source unexpectedly has MASTER status');
 const messages = await allRows(TABLES.sourceMessages, `select=*&source_id=eq.${encodeURIComponent(source.id)}&order=source_message_id.asc`);
 if (!messages?.length) throw new Error('Source manifest is empty');
 
-if (!smokeOnly) {
+if (!smokeOnly && !twoDestinationPilot) {
   const sourceShape = { private_link_id: source.private_link_id, username: source.username };
   const hiddenInternal = messages.some((message) => {
     const entities = [...(message.text_entities || []), ...(message.caption_entities || [])];
@@ -129,7 +142,7 @@ if (!smokeOnly) {
   if (!hasVideo) throw new Error('Fixture missing video');
   if (!hasAlbum) throw new Error('Fixture missing 2+ member album');
   if (pinned.length !== 1) throw new Error(`Fixture must have exactly one pinned message; found ${pinned.length}`);
-} else {
+} else if (smokeOnly) {
   if (!existingCopyOnly && messages.some((message) => message.message_type !== 'text')) {
     throw new Error('Smoke source manifest must contain plain text only');
   }
@@ -162,7 +175,9 @@ if (!smokeOnly) {
       throw new Error('Course manifest contains an incomplete album');
     }
   }
-  console.log(`${existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
+}
+if (smokeOnly || twoDestinationPilot) {
+  console.log(`${twoDestinationPilot ? 'E2E_1TO2_MANIFEST' : existingCopyOnly ? 'E2E_EXISTING_MANIFEST' : 'E2E_SMOKE_MANIFEST'} source=${source.chat_id} messages=${messages.length}`);
 }
 
 await patch(TABLES.settings, 'singleton=eq.true', { distributor_v2_enabled: true, scheduler_enabled: false }, { returning: false });
@@ -223,6 +238,19 @@ for (const destination of destinations) {
       run = await createDistributorRun({ sourceId: source.id, destinationId: destination.id });
       console.log(`E2E_FULL_COURSE_NEW_RUN run=${run.id} preserved_mappings=${mapped.length}`);
     }
+  } else if (resumeTwo) {
+    const prior = await allRows(TABLES.cloneRuns, `select=*&destination_id=eq.${encodeURIComponent(destination.id)}&order=created_at.asc`);
+    if (prior.length !== 1 || prior[0].status !== 'active' || prior[0].source_id !== source.id ||
+        prior[0].phase === 'ready_for_new' || !prior[0].manifest_closed_at ||
+        Number(prior[0].snapshot_high_watermark) !== highWatermark) {
+      throw new Error(`Isolated 1to2 run cannot be resumed for ${destination.chat_id}; no Telegram copy started`);
+    }
+    const manifest = await allRows(TABLES.cloneManifest, `select=source_message_id&run_id=eq.${encodeURIComponent(prior[0].id)}&order=source_message_id.asc`);
+    if (JSON.stringify(manifest.map((item) => Number(item.source_message_id))) !== JSON.stringify(expectedMessageIds)) {
+      throw new Error(`Isolated 1to2 manifest drift for ${destination.chat_id}`);
+    }
+    run = prior[0];
+    console.log(`E2E_1TO2_RESUME run=${run.id} destination=${destination.chat_id}`);
   } else {
     run = await createDistributorRun({ sourceId: source.id, destinationId: destination.id });
   }
@@ -308,16 +336,21 @@ if (existingCopyOnly) {
 
 if (waitForLatePost) {
   const expectedBaselineMappings = messages.length * runIds.length;
-  for (let cycle = 0; cycle < 240; cycle += 1) {
-    if (await mappingCount(runIds) >= expectedBaselineMappings) break;
+  let baselineComplete = false;
+  for (let cycle = 0; cycle < (twoDestinationPilot ? 7200 : 240); cycle += 1) {
+    const copied = await mappingCount(runIds);
+    if (copied >= expectedBaselineMappings) { baselineComplete = true; break; }
+    if (twoDestinationPilot && cycle % 40 === 0) console.log(`E2E_1TO2_BASELINE_PROGRESS copied=${copied} target=${expectedBaselineMappings}`);
+    const blockers = await unresolvedWork(runIds);
+    if (blockers.length) throw new Error(`Distributor blocker before late post: ${JSON.stringify(blockers)}`);
     const claimed = await processClaimed(Math.max(1, runIds.length));
     if (!claimed) await sleep(300);
-    if (cycle === 239) throw new Error('Timed out copying initial manifest before catch-up checkpoint');
   }
+  if (!baselineComplete) throw new Error('Timed out copying initial manifest before catch-up checkpoint; preserve the isolated DB for reconciliation');
   console.log('E2E_POST_LATE_MESSAGE_NOW');
   console.log('Đăng đúng 1 bài chữ mới vào kênh nguồn test. Không sửa/xóa bài cũ. Harness đang chờ webhook test.');
   let observed = null;
-  for (let i = 0; i < 240; i += 1) {
+  for (let i = 0; i < (twoDestinationPilot ? 1200 : 240); i += 1) {
     const rows = await select(TABLES.sourceMessages, `select=source_message_id&source_id=eq.${encodeURIComponent(source.id)}&source_message_id=gt.${highWatermark}&order=source_message_id.asc&limit=1`);
     if (rows?.[0]) {
       const event = await one(TABLES.sourceEvents, `select=id,event_kind,source_message_id&source_id=eq.${encodeURIComponent(source.id)}&source_message_id=eq.${Number(rows[0].source_message_id)}&origin=eq.bot_webhook&limit=1`);

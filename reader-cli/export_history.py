@@ -225,8 +225,9 @@ async def main():
         p.error("Choose only one existing-post selection mode")
     if (args.latest_copyable_only or args.recent_safe_copy_limit or args.course_prefix_limit) and args.cloner_url.rstrip("/") != "http://127.0.0.1:8787":
         p.error("Copy-only selection is restricted to the isolated local E2E server")
-    if args.local_full_copy_only and args.cloner_url.rstrip("/") != "http://127.0.0.1:8787":
-        p.error("Full copy-only import is restricted to the isolated local E2E server")
+    if args.local_full_copy_only and args.cloner_url.rstrip("/") not in (
+            "http://127.0.0.1:8787", "http://127.0.0.1:8788"):
+        p.error("Full copy-only import is restricted to an isolated loopback E2E server")
     if args.local_full_copy_only and (args.expected_count < 5 or args.expected_high_watermark < 7 or len(args.expected_sha256) != 64):
         p.error("Full local copy requires the exact count, high watermark and SHA256 from read-only inventory")
     if args.recent_safe_copy_limit and not 1 <= args.recent_safe_copy_limit <= 4:

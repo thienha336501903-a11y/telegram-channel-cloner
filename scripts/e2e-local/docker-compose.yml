@@ -1,13 +1,13 @@
 services:
   db:
     image: postgres:17
-    container_name: tgcloner-e2e-db
+    container_name: ${E2E_DB_CONTAINER_NAME:-tgcloner-e2e-db}
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1:${E2E_DB_HOST_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 2s
@@ -16,7 +16,7 @@ services:
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
-    container_name: tgcloner-e2e-rest
+    container_name: ${E2E_REST_CONTAINER_NAME:-tgcloner-e2e-rest}
     depends_on:
       db:
         condition: service_healthy
