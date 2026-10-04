@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "reader-cli"))
 
 from reader_manager_storage import load_config  # noqa: E402
 from export_history import resolve_channel  # noqa: E402
-from course_full import scan_course  # noqa: E402
+from course_full import scan_course, validate_snapshot  # noqa: E402
 from telethon import TelegramClient  # noqa: E402
 from telethon.tl.types import InputMessagesFilterPinned  # noqa: E402
 
@@ -39,6 +39,8 @@ select json_build_object(
   'sources', (select json_agg(row_to_json(s)) from s),
   'source_count', (select count(*) from public.tgcloner_source_messages m join s on s.id=m.source_id),
   'source_h', (select max(m.source_message_id) from public.tgcloner_source_messages m join s on s.id=m.source_id),
+  'source_ids', (select json_agg(m.source_message_id order by m.source_message_id)
+    from public.tgcloner_source_messages m join s on s.id=m.source_id),
   'destinations', (select json_agg(json_build_object(
     'id', d.id, 'source_id', d.source_id, 'chat_id', d.chat_id, 'active', d.active,
     'runs', (select json_agg(json_build_object(
@@ -78,7 +80,10 @@ def visible(message):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-clean", action="store_true")
+    parser.add_argument("--after-one", action="store_true")
     args = parser.parse_args()
+    if args.after_one and not args.require_clean:
+        parser.error("--after-one requires --require-clean")
     data = snapshot()
     sources = data.get("sources") or []
     destinations = data.get("destinations") or []
@@ -88,7 +93,9 @@ async def main():
             or {d["chat_id"] for d in destinations} != set(DESTINATIONS)):
         raise RuntimeError("Retained 1to2 TEST database identity changed")
     print(f"AUDIT_SOURCE count={data['source_count']} H={data['source_h']}")
-    if args.require_clean and (int(data["source_count"]) != 60 or int(data["source_h"]) != 61):
+    expected_count = 61 if args.after_one else 60
+    expected_h = 62 if args.after_one else 61
+    if args.require_clean and (int(data["source_count"]) != expected_count or int(data["source_h"]) != expected_h):
         raise RuntimeError("TEST source changed since the verified 60-post run")
 
     config = load_config()
@@ -98,10 +105,18 @@ async def main():
         config["telegram_api_hash"]
     ) as client:
         source_entity = await resolve_channel(client, SOURCE)
-        _, _, source_info = await scan_course(client, source_entity)
+        source_messages, source_pinned, source_info = await scan_course(client, source_entity)
+        live_source_ids = {int(message.id) for message in source_messages}
+        if args.require_clean and {int(value) for value in data.get("source_ids") or []} != live_source_ids:
+            raise RuntimeError("TEST source rows differ between the retained DB and Telegram")
         print(f"AUDIT_LIVE_SOURCE count={source_info['count']} H={source_info['high_watermark']} sha256={source_info['sha256']}")
-        if args.require_clean and (source_info["count"] != 60 or source_info["high_watermark"] != 61
-                                   or source_info["sha256"] != VERIFIED_SOURCE_SHA256):
+        verified_prefix = args.after_one and validate_snapshot(source_messages[:-1], source_entity, source_pinned)
+        if args.require_clean and (source_info["count"] != expected_count or source_info["high_watermark"] != expected_h
+                                   or (args.after_one and (verified_prefix["sha256"] != VERIFIED_SOURCE_SHA256
+                                                           or int(source_messages[-1].id) != 62
+                                                           or getattr(source_messages[-1], "media", None)
+                                                           or not str(getattr(source_messages[-1], "raw_text", "") or "").strip()))
+                                   or (not args.after_one and source_info["sha256"] != VERIFIED_SOURCE_SHA256)):
             raise RuntimeError("Live TEST source changed since the verified 1to2 inventory")
         for destination in destinations:
             chat_id = destination["chat_id"]
@@ -115,7 +130,8 @@ async def main():
                 int(row["destination"]) for row in mappings
                 if row["status"] == "copied" and row["destination"] is not None
             }
-            if len(mapped) != len(mappings):
+            mapped_source = {int(row["source"]) for row in mappings}
+            if len(mapped) != len(mappings) or len(mapped_source) != len(mappings):
                 raise RuntimeError(f"Incomplete or duplicate local mappings: {chat_id}")
             entity = await resolve_channel(client, chat_id)
             live = {int(m.id) async for m in client.iter_messages(entity) if visible(m)}
@@ -134,7 +150,8 @@ async def main():
                 f"mapped_missing={sorted(mapped - live)} pinned={pinned}"
             )
             clean = clean and (run["status"] == "active" and run["phase"] == "ready_for_new"
-                               and int(run["manifest"]) == 59 and len(mapped) == 60
+                               and int(run["manifest"]) == 59 and len(mapped) == expected_count
+                               and mapped_source == live_source_ids
                                and live == mapped and not pinned and not run["copy_ambiguous"])
     if args.require_clean and not clean:
         raise RuntimeError("TEST destinations no longer match the verified clean 1to2 ledger")

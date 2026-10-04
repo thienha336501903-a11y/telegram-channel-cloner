@@ -64,3 +64,52 @@ The current index publisher is restricted to the older 53-post 1→1 fixture.
 Publishing/maintaining two destination-owned indexes needs a separately
 reviewed, idempotent write path and migration 017 in the isolated DB. Neither
 is performed by this audit branch.
+
+## Gate before one more live TEST post
+
+The owner read the live Bot API administrator lists. The dedicated TEST bot
+`@yeubep_distributor_test_bot` and the System C bot
+`@daubepnho_system_c_bot` both had `can_post_messages=true` in **both**
+learner-free TEST destinations on 2026-10-04. This establishes a second
+possible writer; it does not identify who wrote the earlier duplicates. The
+Telegram administrator history for the earlier 11:10 Vietnam-time window was
+unavailable, so do not repeat that request.
+
+The owner, using the creator account, should remove **Post Messages** from the
+System C bot in just `-1003933578709` and `-1004492904064`, or remove that bot
+from just those two TEST destinations. Keep the dedicated TEST bot's post/edit
+rights. Do not change the source, Production, System A or the System C bot's
+permissions elsewhere. The `verify-two-test-bot-access.mjs` preflight now asks
+for *all* administrators including bots and checks the System C bot directly;
+it stops before Docker, webhook setup or a Telegram copy if any other admin
+can post. The gate runs before starting the retained local DB and again
+immediately before webhook setup.
+
+Only after that permission change, and after the PR code is available on the
+Windows computer, use `-ContinueTwoOnePost` with the exact verified 60-post
+inventory. Start a temporary Cloudflare Quick Tunnel to local port 8788 in a
+separate window, keep it running, then from the reviewed branch run:
+
+```powershell
+& .\scripts\e2e-local\run.ps1 `
+  -Mode 1to2 -ContinueTwoOnePost -DisposableSourceConfirmed `
+  -Source '-1004320185488' `
+  -Destinations @('-1003933578709', '-1004492904064') `
+  -ExpectedHistoryCount 60 -ExpectedHighWatermark 61 `
+  -ExpectedInventorySha256 '2903f3050010c9106866be85f11e08506785e618e3f7f222b75d4fddcb7fa7bd' `
+  -PublicUrl 'https://YOUR-CURRENT-TUNNEL.trycloudflare.com'
+```
+
+Enter the TEST bot token only in the local prompt. Wait for
+`E2E_POST_ONE_NEW_MESSAGE_NOW`, then post **one plain-text message** in the
+learner-free TEST source. The mode reuses the two existing READY runs and the
+59-post closed manifests; it cannot create another run or replay the 60 mapped
+posts. It requires source post #62, maps it once to each destination, checks
+both new 61-post channels and removes only its own temporary webhook. If the
+run stops after #62, preserve the DB and both destinations and inspect them
+before any retry; the same command deliberately refuses a changed source
+inventory. Do not rerun a fresh full-copy command.
+
+After `E2E_AUTOMATED_GATE_PASS`, the index *preview* can be regenerated from
+the 61-post source with `preview-two-course-index.ps1 -AfterOne`. It remains
+read-only and does not publish an index or enable V2 in Production.

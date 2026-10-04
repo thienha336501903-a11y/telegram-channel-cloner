@@ -36,10 +36,12 @@ select json_build_object(
   ) order by d.chat_id) from d)
 )::text`;
 
-export function buildTwoDestinationPreviews(data, { appendixStartSourceId = null } = {}) {
+export function buildTwoDestinationPreviews(data, { appendixStartSourceId = null, afterOne = false } = {}) {
+  const expectedCount = afterOne ? 61 : 60;
+  const expectedH = afterOne ? 62 : 61;
   if (data?.source?.chat_id !== SOURCE || data.source.active !== false ||
-      !Array.isArray(data.messages) || data.messages.length !== 60 ||
-      Number(data.messages.at(-1)?.source_message_id) !== 61 ||
+      !Array.isArray(data.messages) || data.messages.length !== expectedCount ||
+      Number(data.messages.at(-1)?.source_message_id) !== expectedH ||
       data.messages.at(-1)?.message_type !== 'text' ||
       !Array.isArray(data.destinations) || data.destinations.length !== 2 ||
       JSON.stringify(data.destinations.map((row) => row.destination?.chat_id)) !== JSON.stringify(DESTINATIONS)) {
@@ -64,7 +66,7 @@ export function buildTwoDestinationPreviews(data, { appendixStartSourceId = null
     }
     const index = buildCourseIndex({ source: data.source, destination, messages: data.messages,
       mappings: row.mappings, appendixStartSourceId });
-    if (index.postCount !== 60 || index.highWatermark !== 61 || index.albumCount !== 10) {
+    if (index.postCount !== expectedCount || index.highWatermark !== expectedH || index.albumCount !== 10) {
       throw new Error(`Destination ${destination.chat_id} mapping or album inventory changed`);
     }
     previews.push({ destination: destination.chat_id, runId: run.id, index });
@@ -75,11 +77,12 @@ export function buildTwoDestinationPreviews(data, { appendixStartSourceId = null
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const appendixArg = process.argv.find((arg) => arg.startsWith('--appendix-start='));
   const appendixStartSourceId = appendixArg ? Number(appendixArg.split('=')[1]) : null;
+  const afterOne = process.argv.includes('--after-one');
   const output = execFileSync('docker', ['exec', DB_CONTAINER, 'psql', '-U', 'postgres', '-d', 'postgres',
     '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', sql], {
     encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024
   }).trim();
-  for (const { destination, runId, index } of buildTwoDestinationPreviews(JSON.parse(output), { appendixStartSourceId })) {
+  for (const { destination, runId, index } of buildTwoDestinationPreviews(JSON.parse(output), { appendixStartSourceId, afterOne })) {
     console.log(`E2E_1TO2_INDEX_PREVIEW destination=${destination} run=${runId} posts=${index.postCount} entries=${index.groupCount} albums=${index.albumCount} H=${index.highWatermark} hash=${index.hash} chars=${index.text.length}`);
     for (const [i, entry] of index.entries.entries()) {
       console.log(`INDEX_ENTRY ${String(i + 1).padStart(2, '0')} destination=${destination} source=${entry.sourceIds.join(',')} target=${entry.destinationId} title=${entry.title}`);

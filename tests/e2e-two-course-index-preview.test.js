@@ -47,3 +47,15 @@ test('blocks a changed run, baseline, or duplicated destination mapping before p
   duplicate.destinations[0].mappings.push({ ...duplicate.destinations[0].mappings[0] });
   assert.throws(() => buildTwoDestinationPreviews(duplicate), /Mappings must be unique/);
 });
+
+test('after exactly one mapped new post, previews both destinations from the retained baseline', () => {
+  const data = fixture();
+  data.messages.push({ source_message_id: 62, message_type: 'text', text: 'Bài mới', media_group_id: null });
+  for (const [i, row] of data.destinations.entries()) {
+    row.mappings.push({ source_message_id: 62, destination_message_id: i ? 141 : 69, status: 'copied' });
+  }
+  const previews = buildTwoDestinationPreviews(data, { afterOne: true });
+  assert.deepEqual(previews.map(row => row.index.postCount), [61, 61]);
+  assert.deepEqual(previews.map(row => row.index.highWatermark), [62, 62]);
+  assert.throws(() => buildTwoDestinationPreviews(data), /source or destination set changed/);
+});

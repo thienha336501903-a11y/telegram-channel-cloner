@@ -15,23 +15,26 @@ async def main():
     if source_chat != "-1004320185488" or sorted(destinations) != [
             "-1003933578709", "-1004492904064"]:
         raise RuntimeError("Isolated 1to2 resume identity mismatch")
-    sources = rest("tgcloner_sources", f"select=id&chat_id=eq.{source_chat}&limit=1")
-    if len(sources) != 1:
+    sources = rest("tgcloner_sources", f"select=id,active&chat_id=eq.{source_chat}&limit=1")
+    if len(sources) != 1 or sources[0]["active"] is not False:
         raise RuntimeError("Source missing from isolated DB")
     source_id = sources[0]["id"]
     recover_after_late = os.environ.get("E2E_RECOVER_TWO_AFTER_LATE", "").lower() == "true"
+    continue_one = os.environ.get("E2E_CONTINUE_TWO_ONE_POST", "").lower() == "true"
     baseline_h = int(os.environ.get("E2E_EXPECTED_HIGH_WATERMARK", "0"))
     expected_count = int(os.environ.get("E2E_EXPECTED_HISTORY_COUNT", "0"))
-    late_id = int(os.environ.get("E2E_EXPECTED_LATE_SOURCE_ID", "0"))
+    late_id = 61 if continue_one else int(os.environ.get("E2E_EXPECTED_LATE_SOURCE_ID", "0"))
     source_rows = rest_all("tgcloner_source_messages",
                        f"select=source_message_id,message_type,media_group_id&source_id=eq.{source_id}")
     source_ids = {int(row["source_message_id"]) for row in source_rows}
     baseline_ids = {message_id for message_id in source_ids if message_id <= baseline_h}
-    if recover_after_late:
+    if recover_after_late or continue_one:
         late = [row for row in source_rows if int(row["source_message_id"]) == late_id]
         events = rest_all("tgcloner_source_events",
                           f"select=id,origin,event_kind,source_message_id&source_id=eq.{source_id}")
-        if (len(baseline_ids) != expected_count or max(baseline_ids, default=0) != baseline_h
+        if (len(baseline_ids) != expected_count
+                or max(baseline_ids, default=0) != baseline_h
+                or (continue_one and (expected_count != 60 or baseline_h != 61 or late_id != 61))
                 or source_ids != baseline_ids | {late_id} or len(late) != 1
                 or late[0]["message_type"] != "text" or late[0]["media_group_id"]
                 or len(events) != 1 or events[0]["origin"] != "bot_webhook"
@@ -44,22 +47,29 @@ async def main():
                               os.environ["TELEGRAM_API_HASH"]) as client:
         for chat_id in destinations:
             destination_rows = rest("tgcloner_destinations",
-                                    f"select=id,source_id&chat_id=eq.{chat_id}&limit=1")
-            if len(destination_rows) != 1 or destination_rows[0]["source_id"] != source_id:
+                                    f"select=id,source_id,active&chat_id=eq.{chat_id}&limit=1")
+            if (len(destination_rows) != 1 or destination_rows[0]["source_id"] != source_id
+                    or destination_rows[0]["active"] is not False):
                 raise RuntimeError(f"Isolated destination identity mismatch: {chat_id}")
             destination_id = destination_rows[0]["id"]
             runs = rest("tgcloner_clone_runs",
-                        f"select=id,status,phase,snapshot_high_watermark,manifest_closed_at&destination_id=eq.{destination_id}")
-            if len(runs) != 1 or runs[0]["status"] != "active" or not runs[0]["manifest_closed_at"] or (
-                    recover_after_late and (int(runs[0]["snapshot_high_watermark"] or 0) != baseline_h
-                                            or runs[0]["phase"] not in (
-                                                "catching_up", "rewriting", "verifying", "ready_for_new"))):
+                        f"select=id,status,phase,snapshot_high_watermark,manifest_closed_at,last_verified_at&destination_id=eq.{destination_id}")
+            if len(runs) != 1 or runs[0]["status"] != "active" or not runs[0]["manifest_closed_at"]:
                 raise RuntimeError(f"Isolated run is not safely resumable: {chat_id}")
+            if recover_after_late or continue_one:
+                valid_phases = (("ready_for_new",) if continue_one else
+                                ("catching_up", "rewriting", "verifying", "ready_for_new"))
+                if (int(runs[0]["snapshot_high_watermark"] or 0) != 60
+                        or runs[0]["phase"] not in valid_phases
+                        or continue_one and not runs[0]["last_verified_at"]):
+                    raise RuntimeError(f"Retained TEST run has changed: {chat_id}")
             run_id = runs[0]["id"]
-            if recover_after_late:
+            if recover_after_late or continue_one:
                 manifest = rest_all("tgcloner_clone_manifest",
                                     f"select=source_message_id&run_id=eq.{run_id}")
-                if {int(row["source_message_id"]) for row in manifest} != baseline_ids or len(manifest) != expected_count:
+                manifest_ids = {int(row["source_message_id"]) for row in manifest}
+                expected_manifest_ids = {message_id for message_id in source_ids if message_id <= 60}
+                if (manifest_ids != expected_manifest_ids or len(manifest) != 59):
                     raise RuntimeError(f"Closed baseline manifest changed: {chat_id}")
             unsafe = rest_all("tgcloner_clone_work",
                           f"select=id,phase,status,side_effect_state&run_id=eq.{run_id}"
@@ -69,6 +79,8 @@ async def main():
                    or (row["side_effect_state"] == "not_applicable" and row["phase"] != "verify")
                    for row in unsafe):
                 raise RuntimeError(f"Unreconciled work may have Telegram side effects: {chat_id}")
+            if continue_one and unsafe:
+                raise RuntimeError(f"TEST run has pending work before the new post: {chat_id}")
             mappings = rest_all("tgcloner_message_mappings",
                             f"select=source_message_id,destination_message_id,status"
                             f"&destination_id=eq.{destination_id}")
@@ -76,17 +88,18 @@ async def main():
                    int(row["source_message_id"]) not in source_ids or
                    not int(row["destination_message_id"] or 0) for row in mappings):
                 raise RuntimeError(f"Incomplete or foreign mapping in isolated DB: {chat_id}")
-            if recover_after_late:
+            if recover_after_late or continue_one:
                 mapped_source_ids = {int(row["source_message_id"]) for row in mappings}
-                if (mapped_source_ids != baseline_ids and mapped_source_ids != source_ids
-                        or len(mappings) != len(mapped_source_ids)):
+                if (len(mappings) != len(mapped_source_ids)
+                        or (continue_one and mapped_source_ids != source_ids)
+                        or (recover_after_late and mapped_source_ids not in (baseline_ids, source_ids))):
                     raise RuntimeError(f"Baseline mappings incomplete or duplicated: {chat_id}")
             mappings.sort(key=lambda row: int(row["source_message_id"]))
             ids = [int(row["destination_message_id"]) for row in mappings]
             if ids != sorted(set(ids)):
                 raise RuntimeError(f"Destination message order or uniqueness mismatch: {chat_id}")
             entity = await resolve_channel(client, chat_id)
-            if recover_after_late:
+            if recover_after_late or continue_one:
                 pinned = [message.id async for message in client.iter_messages(
                     entity, filter=InputMessagesFilterPinned)]
                 if pinned:
@@ -97,7 +110,7 @@ async def main():
                     messages = [messages]
                 if {int(message.id) for message in messages if message is not None} != set(ids):
                     raise RuntimeError(f"Mapped Telegram messages were deleted: {chat_id}")
-            if recover_after_late:
+            if recover_after_late or continue_one:
                 visible_ids = set()
                 async for message in client.iter_messages(entity):
                     if not getattr(message, "action", None) and (

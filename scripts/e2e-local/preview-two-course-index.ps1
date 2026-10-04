@@ -1,4 +1,4 @@
-param([long]$AppendixStartSourceId = 0)
+param([long]$AppendixStartSourceId = 0, [switch]$AfterOne)
 
 $ErrorActionPreference = 'Stop'
 if ($AppendixStartSourceId -lt 0) { throw 'AppendixStartSourceId must be zero or a source post ID.' }
@@ -16,9 +16,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Start the retained DB container without recrea
 
 Push-Location $repoRoot
 try {
-  python scripts/e2e-local/audit-two-writers.py --require-clean
+  $auditArgs = @('scripts/e2e-local/audit-two-writers.py', '--require-clean')
+  if ($AfterOne) { $auditArgs += '--after-one' }
+  & python @auditArgs
   if ($LASTEXITCODE -ne 0) { throw 'Read-only source/destination reconciliation failed; no index preview produced.' }
   $argsList = @('scripts/e2e-local/preview-two-course-index.mjs')
+  if ($AfterOne) { $argsList += '--after-one' }
   if ($AppendixStartSourceId -gt 0) { $argsList += "--appendix-start=$AppendixStartSourceId" }
   & node @argsList
   if ($LASTEXITCODE -ne 0) { throw 'Local DB index preview failed; no Telegram write occurred.' }
