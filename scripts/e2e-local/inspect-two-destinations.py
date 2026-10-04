@@ -31,6 +31,8 @@ async def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--recover-after-late", action="store_true")
     parser.add_argument("--expected-late-source-id", type=int, default=0)
+    parser.add_argument("--continue-one", action="store_true")
+    parser.add_argument("--after-one", action="store_true")
     args = parser.parse_args()
     if len(args.destination) != 2 or len(set(args.destination + [args.source])) != 3:
         parser.error("One distinct source and exactly two distinct destinations are required")
@@ -38,6 +40,18 @@ async def main():
             or not args.expected_high_watermark or not args.expected_sha256
             or args.expected_late_source_id != args.expected_high_watermark + 1):
         parser.error("Recovery requires the immutable baseline inventory and its one late post")
+    if args.continue_one and (args.recover_after_late or args.after_one or not args.resume
+            or args.expected_count != 60 or args.expected_high_watermark != 61
+            or args.expected_sha256.lower() !=
+            "2903f3050010c9106866be85f11e08506785e618e3f7f222b75d4fddcb7fa7bd"
+            or args.expected_late_source_id):
+        parser.error("One-post continuation requires the verified 60-post TEST inventory")
+    if args.after_one and (args.continue_one or args.recover_after_late or not args.resume
+            or args.expected_count != 60 or args.expected_high_watermark != 61
+            or args.expected_sha256.lower() !=
+            "2903f3050010c9106866be85f11e08506785e618e3f7f222b75d4fddcb7fa7bd"
+            or args.expected_late_source_id):
+        parser.error("Post-copy readback requires the verified 60-post TEST baseline")
     api_id = int(os.environ.get("TELEGRAM_API_ID", "0") or 0)
     api_hash = os.environ.get("TELEGRAM_API_HASH", "")
     if not api_id or not api_hash:
@@ -48,7 +62,19 @@ async def main():
         messages, pinned_ids, info = await scan_course(client, source)
         if info["pinned"] > 1:
             raise RuntimeError("TEST source has multiple pinned posts; pin parity cannot be verified")
-        if args.recover_after_late:
+        if args.after_one:
+            baseline = validate_snapshot(messages[:-1], source, pinned_ids)
+            new_post = messages[-1]
+            if (baseline["count"] != args.expected_count
+                    or baseline["high_watermark"] != args.expected_high_watermark
+                    or baseline["sha256"] != args.expected_sha256.lower()
+                    or info["count"] != 61 or info["high_watermark"] != 62
+                    or int(new_post.id) != 62 or getattr(new_post, "media", None)
+                    or getattr(new_post, "grouped_id", None)
+                    or not str(getattr(new_post, "raw_text", "") or "").strip()):
+                raise RuntimeError("Source differs from the verified 60 posts plus exactly one text post #62")
+            print(f"E2E_1TO2_ONE_POST_SOURCE_PASS count=61 H=62 sha256={info['sha256']}")
+        elif args.recover_after_late:
             late = messages[-1]
             baseline = validate_snapshot(messages[:-1], source, pinned_ids)
             if (baseline["count"] != args.expected_count

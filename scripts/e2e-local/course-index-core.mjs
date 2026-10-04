@@ -17,8 +17,16 @@ function safeLabel(value) {
 
 function titleFor(messages, position, maxLength) {
   const content = messages.map((message) => message.text || message.caption || '').find((text) => String(text).trim());
-  const firstLine = String(content || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
-  const plain = safeLabel(firstLine);
+  const rawLines = String(content || '').split(/\r?\n/).map((line) => line.trim());
+  const firstIndex = rawLines.findIndex((line) => safeLabel(line));
+  const firstLine = firstIndex >= 0 ? rawLines[firstIndex] : '';
+  const firstPlain = safeLabel(firstLine);
+  const lessonHeadingOnly = /^bài\s*0*\d+\s*(?::|[.\-–—])?\s*$/iu.test(firstPlain);
+  let plain = firstPlain;
+  if (lessonHeadingOnly && firstIndex >= 0) {
+    const detail = rawLines.slice(firstIndex + 1).map((line) => safeLabel(line)).find(Boolean) || '';
+    if (detail) plain = `${firstPlain} ${detail}`;
+  }
   const fallback = messages.length > 1 ? `Album ${position}` : `Bài ${position}`;
   const clean = plain || fallback;
   const letters = Array.from(clean);
