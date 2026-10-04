@@ -7,6 +7,7 @@ on:
       - 'reader-manager/**'
       - 'reader-cli/**'
       - 'scripts/e2e-local/run.ps1'
+      - 'scripts/rebuild-export/run-test-pilot.ps1'
       - '.github/workflows/reader-manager-windows.yml'
       - '.github/workflows/release-windows.yml'
 
@@ -32,8 +33,12 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'scripts/e2e-local/run.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+          foreach ($path in @('scripts/e2e-local/run.ps1', 'scripts/rebuild-export/run-test-pilot.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "$path`n$($errors | Out-String)" }
+          }
       - name: Build installer
         shell: powershell
         run: ./reader-manager/build.ps1
