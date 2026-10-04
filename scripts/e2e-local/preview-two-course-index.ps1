@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Start the retained DB container without recrea
 Push-Location $repoRoot
 try {
   $auditArgs = @('scripts/e2e-local/audit-two-writers.py', '--require-clean')
-  if ($AfterOne) { $auditArgs += '--after-one' }
+  if ($AfterOne) { $auditArgs += @('--after-one', '--allow-registered-index') }
   & python @auditArgs
   if ($LASTEXITCODE -ne 0) { throw 'Read-only source/destination reconciliation failed; no index preview produced.' }
   $argsList = @('scripts/e2e-local/preview-two-course-index.mjs')
