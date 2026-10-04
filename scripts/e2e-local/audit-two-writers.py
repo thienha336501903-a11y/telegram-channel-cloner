@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "reader-cli"))
 from reader_manager_storage import load_config  # noqa: E402
 from export_history import resolve_channel  # noqa: E402
 from course_full import scan_course, validate_snapshot  # noqa: E402
+from existing_text import course_link_targets, course_prefix_blocker, eligible_existing_post  # noqa: E402
 from telethon import TelegramClient  # noqa: E402
 from telethon.tl.types import InputMessagesFilterPinned  # noqa: E402
 
@@ -82,6 +83,31 @@ def visible(message):
     )
 
 
+def source_owned_index_candidate(message, source, db_source_ids):
+    """Recognize the exact TEST-only shape of a destination-owned index source post.
+
+    This is intentionally conservative and is used only by the retained 1→2 audit
+    after destination-owned indexes have already been registered. It never changes
+    Production ingestion or Distributor V2 semantics.
+    """
+    if not message or int(getattr(message, "id", 0) or 0) <= 0:
+        return False
+    if not str(getattr(message, "raw_text", "") or "").strip():
+        return False
+    media = getattr(message, "media", None)
+    if not media or media.__class__.__name__ != "MessageMediaWebPage":
+        return False
+    if getattr(message, "grouped_id", None) or getattr(message, "reply_to_msg_id", None):
+        return False
+    if not eligible_existing_post(message) or course_prefix_blocker(message):
+        return False
+    targets = course_link_targets(message, source)
+    if len(targets) < 2 or any(not target.startswith("source_post:") for target in targets):
+        return False
+    target_ids = {int(target.partition(":")[2]) for target in targets}
+    return bool(target_ids) and target_ids.issubset(db_source_ids)
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-clean", action="store_true")
@@ -114,16 +140,37 @@ async def main():
     ) as client:
         source_entity = await resolve_channel(client, SOURCE)
         source_messages, source_pinned, source_info = await scan_course(client, source_entity)
-        live_source_ids = {int(message.id) for message in source_messages}
-        if args.require_clean and {int(value) for value in data.get("source_ids") or []} != live_source_ids:
+        db_source_ids = {int(value) for value in data.get("source_ids") or []}
+        course_source_messages = list(source_messages)
+        course_source_pinned = set(source_pinned)
+        live_source_ids = {int(message.id) for message in course_source_messages}
+
+        # After destination-owned indexes are registered, the owner may also add
+        # a pinned source-side table of contents. In the exact retained TEST
+        # fixture, allow one new pinned link-directory post to remain source-only
+        # instead of misclassifying it as a new course lesson. This is audit-only.
+        if args.allow_registered_index:
+            live_only = live_source_ids - db_source_ids
+            if len(live_only) == 1 and set(source_pinned) == live_only:
+                source_index_id = next(iter(live_only))
+                candidate = next((m for m in course_source_messages if int(m.id) == source_index_id), None)
+                if (source_index_id == expected_h + 1
+                        and source_owned_index_candidate(candidate, source_entity, db_source_ids)):
+                    course_source_messages = [m for m in course_source_messages if int(m.id) != source_index_id]
+                    course_source_pinned = set(source_pinned) - {source_index_id}
+                    live_source_ids = {int(message.id) for message in course_source_messages}
+                    source_info = validate_snapshot(course_source_messages, source_entity, course_source_pinned)
+                    print(f"AUDIT_SOURCE_INDEX_IGNORED message_id={source_index_id} source_owned=true")
+
+        if args.require_clean and db_source_ids != live_source_ids:
             raise RuntimeError("TEST source rows differ between the retained DB and Telegram")
         print(f"AUDIT_LIVE_SOURCE count={source_info['count']} H={source_info['high_watermark']} sha256={source_info['sha256']}")
-        verified_prefix = args.after_one and validate_snapshot(source_messages[:-1], source_entity, source_pinned)
+        verified_prefix = args.after_one and validate_snapshot(course_source_messages[:-1], source_entity, course_source_pinned)
         if args.require_clean and (source_info["count"] != expected_count or source_info["high_watermark"] != expected_h
                                    or (args.after_one and (verified_prefix["sha256"] != VERIFIED_SOURCE_SHA256
-                                                           or int(source_messages[-1].id) != 62
-                                                           or getattr(source_messages[-1], "media", None)
-                                                           or not str(getattr(source_messages[-1], "raw_text", "") or "").strip()))
+                                                           or int(course_source_messages[-1].id) != 62
+                                                           or getattr(course_source_messages[-1], "media", None)
+                                                           or not str(getattr(course_source_messages[-1], "raw_text", "") or "").strip()))
                                    or (not args.after_one and source_info["sha256"] != VERIFIED_SOURCE_SHA256)):
             raise RuntimeError("Live TEST source changed since the verified 1to2 inventory")
         for destination in destinations:
