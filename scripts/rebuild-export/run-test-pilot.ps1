@@ -12,6 +12,9 @@ param(
   [ValidateRange(1,2)]
   [int]$MaxUnits = 1,
 
+  [ValidateRange(1,14)]
+  [int]$StartUnit = 1,
+
   [switch]$Publish
 )
 
@@ -32,7 +35,8 @@ $argsList = @(
   $script,
   '--manifest', $Manifest,
   '--destination-title', $DestinationTitle,
-  '--max-units', [string]$MaxUnits
+  '--max-units', [string]$MaxUnits,
+  '--start-unit', [string]$StartUnit
 )
 
 if ($Destination) {
@@ -49,6 +53,7 @@ if ($ProfileName) {
 if ($Publish) {
   Write-Host 'REBUILD TEST PILOT: Telegram destination write is ENABLED.'
   Write-Host "Destination title: $DestinationTitle"
+  Write-Host "Start unit: $StartUnit"
   Write-Host "Max units: $MaxUnits"
   $confirm = Read-Host 'Type PUBLISH-TEST exactly to continue'
   if ($confirm -ne 'PUBLISH-TEST') {
