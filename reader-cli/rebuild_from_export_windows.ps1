@@ -18,19 +18,19 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Script = Join-Path $PSScriptRoot 'rebuild_from_export.py'
 
 if (-not (Test-Path -LiteralPath $Manifest -PathType Leaf)) {
-  throw "Không tìm thấy rebuild manifest: $Manifest"
+  throw "Rebuild manifest not found: $Manifest"
 }
 
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) {
-  throw 'Python 3 không có trong PATH.'
+  throw 'Python 3 is not available in PATH.'
 }
 
 Push-Location $RepoRoot
 try {
   & $python.Source -c "import telethon" 2>$null
   if ($LASTEXITCODE -ne 0) {
-    throw 'Thiếu Telethon. Hãy dùng máy Reader đã cài dependencies.'
+    throw 'Telethon is missing. Use the configured Windows Reader machine.'
   }
 
   $argsList = @(
@@ -48,7 +48,7 @@ try {
 
   & $python.Source @argsList
   if ($LASTEXITCODE -ne 0) {
-    throw 'REBUILD TEST pilot dừng an toàn. Không retry mù nếu đã dùng -Publish.'
+    throw 'REBUILD TEST pilot stopped safely. Do not blindly retry after -Publish.'
   }
 }
 finally {
