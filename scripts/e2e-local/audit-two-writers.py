@@ -32,7 +32,9 @@ with s as (
   select id, chat_id, active from public.tgcloner_sources
   where chat_id = '-1004320185488'
 ), d as (
-  select id, source_id, chat_id, active from public.tgcloner_destinations
+  select id, source_id, chat_id, active,
+         course_index_message_id, course_index_content_hash, course_index_high_watermark
+  from public.tgcloner_destinations
   where chat_id in ('-1003933578709', '-1004492904064')
 )
 select json_build_object(
@@ -43,9 +45,9 @@ select json_build_object(
     from public.tgcloner_source_messages m join s on s.id=m.source_id),
   'destinations', (select json_agg(json_build_object(
     'id', d.id, 'source_id', d.source_id, 'chat_id', d.chat_id, 'active', d.active,
-    'course_index_message_id', (to_jsonb(d)->>'course_index_message_id'),
-    'course_index_content_hash', (to_jsonb(d)->>'course_index_content_hash'),
-    'course_index_high_watermark', (to_jsonb(d)->>'course_index_high_watermark'),
+    'course_index_message_id', d.course_index_message_id,
+    'course_index_content_hash', d.course_index_content_hash,
+    'course_index_high_watermark', d.course_index_high_watermark,
     'runs', (select json_agg(json_build_object(
       'id', r.id, 'status', r.status, 'phase', r.phase,
       'snapshot_h', r.snapshot_high_watermark,
