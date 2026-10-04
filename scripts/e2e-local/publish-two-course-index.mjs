@@ -175,29 +175,46 @@ async function updateExistingOne(row, stateDir) {
     throw new Error(`TEST index watermark changed for ${row.destination}`);
   }
 
-  const previousHash = state.phase === 'editing'
-    ? String(state.previousContentHash || '')
-    : String(state.contentHash || '');
-  const targetHash = state.phase === 'editing'
-    ? String(state.targetContentHash || '')
-    : row.index.hash;
-
-  if (previousHash !== expected.hash || targetHash !== row.index.hash || previousHash === targetHash) {
-    throw new Error(`Unexpected TEST index hash transition for ${row.destination}`);
+  const targetHash = row.index.hash;
+  const registeredHash = String(row.destinationRow.course_index_content_hash || '');
+  const registeredMessageId = Number(row.destinationRow.course_index_message_id || 0);
+  const registeredH = Number(row.destinationRow.course_index_high_watermark || 0);
+  if (registeredMessageId !== expected.messageId || registeredH !== 62 ||
+      ![expected.hash, targetHash].includes(registeredHash)) {
+    throw new Error(`Registered TEST index evidence is outside the reviewed transition for ${row.destination}`);
   }
-
-  verifyRegisteredSnapshot(row, state.messageId, {
-    expectedHash: previousHash,
-    expectedHighWatermark: 62
-  });
 
   const chat = await getChatSafely({ chatId: row.destination });
   if (chat?.type !== 'channel' || String(chat.id) !== row.destination ||
       Number(chat?.pinned_message?.message_id || 0) !== Number(state.messageId)) {
     throw new Error(`Pinned TEST index identity changed for ${row.destination}`);
   }
-
   const currentHash = pinnedIndexHash(chat, state.messageId);
+
+  // Fully completed destination from an earlier partial run: no Telegram write.
+  if (state.phase === 'published' && state.contentHash === targetHash) {
+    if (registeredHash !== targetHash || currentHash !== targetHash) {
+      throw new Error(`Completed TEST index evidence drifted for ${row.destination}`);
+    }
+    console.log(`E2E_1TO2_INDEX_DESTINATION_PASS destination=${row.destination} message_id=${state.messageId} existing=true updated=false`);
+    return;
+  }
+
+  let previousHash;
+  if (state.phase === 'editing') {
+    previousHash = String(state.previousContentHash || '');
+    if (previousHash !== expected.hash || String(state.targetContentHash || '') !== targetHash) {
+      throw new Error(`Interrupted TEST index update ledger is invalid for ${row.destination}`);
+    }
+  } else {
+    previousHash = String(state.contentHash || '');
+    if (state.phase !== 'published' || previousHash !== expected.hash) {
+      throw new Error(`Unexpected TEST index hash transition for ${row.destination}`);
+    }
+  }
+
+  // If Telegram already has the target (for example a transport/crash happened
+  // after editMessageText), finish DB + ledger without another Telegram edit.
   if (currentHash === targetHash) {
     registerIndex(row, state.messageId);
     state = { ...state, phase: 'published', contentHash: targetHash, highWatermark: 62 };
@@ -207,8 +224,9 @@ async function updateExistingOne(row, stateDir) {
     console.log(`E2E_1TO2_INDEX_DESTINATION_PASS destination=${row.destination} message_id=${state.messageId} existing=true updated=true recovered=true`);
     return;
   }
-  if (currentHash !== previousHash) {
-    throw new Error(`Pinned TEST index content is neither reviewed old nor target content for ${row.destination}`);
+
+  if (currentHash !== previousHash || registeredHash !== previousHash) {
+    throw new Error(`TEST index old/new evidence is inconsistent for ${row.destination}`);
   }
 
   if (state.phase !== 'editing') {
