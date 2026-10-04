@@ -113,3 +113,38 @@ inventory. Do not rerun a fresh full-copy command.
 After `E2E_AUTOMATED_GATE_PASS`, the index *preview* can be regenerated from
 the 61-post source with `preview-two-course-index.ps1 -AfterOne`. It remains
 read-only and does not publish an index or enable V2 in Production.
+
+
+## Verified one-post gate and destination-owned index publish pilot
+
+Owner-side Windows evidence on 2026-10-04 at exact HEAD `b118f63ea47c9630fcaac867863a55b9000ab7bb` closed
+the one-post catch-up gate. Source post #62 was captured as durable
+`bot_webhook` event 2, both retained runs returned to `ready_for_new`, both
+destinations passed read-only Telegram verification with 61 mappings, and the
+source passed at 61 visible posts with H=62. The automated harness ended with
+`E2E_AUTOMATED_GATE_PASS mode=1to2` and removed its temporary TEST webhook.
+
+The independent `preview-two-course-index.ps1 -AfterOne` reconciliation then
+confirmed 61 mapped/visible posts in both destinations, no extra/missing/pinned
+posts, 26 index entries and 10 albums per destination. The generated
+destination-specific hashes were
+`8fb4d444dadb850945e8b0bfbd7fe0ff64419a98b9a436ad752ed845e077549f`
+for `-1003933578709` and
+`6ee7ce50beaa3ebd48af0611f143bd95c20a72d0c7545b5a1621cca1b6bef4b9`
+for `-1004492904064`. Preview made no Telegram write.
+
+The next TEST-only gate is `publish-two-course-index.ps1 -AfterOne -Publish`.
+It is restricted to the retained `tgcloner-e2e-1to2-db` fixture. Before any
+Telegram index send it creates a local PostgreSQL checkpoint, applies the
+already-reviewed inert migration 017 only to that TEST database, runs a strict
+61-post reconciliation, rechecks the dedicated TEST bot/writer inventory, and
+uses a durable local per-destination ledger. A transport-ambiguous send leaves
+the ledger armed and blocks blind retry, preventing a second index post. A
+successful post must be pinned, independently verified, and registered to its
+own destination/run through
+`tgcloner_distributor_register_course_index`.
+
+This is deliberately a first-publish TEST path, not full Production index
+maintenance. If source content changes after H=62, content-hash drift is
+fail-closed until a separately reviewed edit-in-place maintenance path exists.
+Keep PR #101 draft and Distributor V2 disabled in Production after this pilot.

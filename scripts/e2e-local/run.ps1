@@ -413,7 +413,7 @@ try {
   if (-not $ResumeCourseFull -and -not $RetainTwoDestination) {
     Invoke-PsqlFile (Join-Path $PSScriptRoot 'bootstrap.sql')
     Invoke-PsqlFile (Join-Path $RepoRoot 'sql\002_shared_supabase_tgcloner_schema.sql')
-    foreach ($n in 10..16) {
+    foreach ($n in 10..17) {
       $file = Get-ChildItem (Join-Path $RepoRoot 'sql') -Filter (('{0:D3}_*.sql' -f $n)) | Select-Object -First 1
       if (-not $file) { throw "Missing migration $n" }
       Invoke-PsqlFile $file.FullName

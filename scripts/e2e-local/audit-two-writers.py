@@ -43,6 +43,9 @@ select json_build_object(
     from public.tgcloner_source_messages m join s on s.id=m.source_id),
   'destinations', (select json_agg(json_build_object(
     'id', d.id, 'source_id', d.source_id, 'chat_id', d.chat_id, 'active', d.active,
+    'course_index_message_id', (to_jsonb(d)->>'course_index_message_id'),
+    'course_index_content_hash', (to_jsonb(d)->>'course_index_content_hash'),
+    'course_index_high_watermark', (to_jsonb(d)->>'course_index_high_watermark'),
     'runs', (select json_agg(json_build_object(
       'id', r.id, 'status', r.status, 'phase', r.phase,
       'snapshot_h', r.snapshot_high_watermark,
@@ -81,9 +84,12 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-clean", action="store_true")
     parser.add_argument("--after-one", action="store_true")
+    parser.add_argument("--allow-registered-index", action="store_true")
     args = parser.parse_args()
     if args.after_one and not args.require_clean:
         parser.error("--after-one requires --require-clean")
+    if args.allow_registered_index and not (args.require_clean and args.after_one):
+        parser.error("--allow-registered-index requires --require-clean --after-one")
     data = snapshot()
     sources = data.get("sources") or []
     destinations = data.get("destinations") or []
@@ -138,6 +144,21 @@ async def main():
             pinned = [int(m.id) async for m in client.iter_messages(
                 entity, filter=InputMessagesFilterPinned
             )]
+            registered_message = int(destination.get("course_index_message_id") or 0)
+            registered_hash = str(destination.get("course_index_content_hash") or "")
+            registered_h = int(destination.get("course_index_high_watermark") or 0)
+            registered_values = (registered_message, bool(registered_hash), registered_h)
+            if args.allow_registered_index:
+                complete_registration = all(registered_values) or not any(registered_values)
+                if not complete_registration:
+                    raise RuntimeError(f"Incomplete destination index registration: {chat_id}")
+                if registered_message:
+                    if (len(registered_hash) != 64 or any(c not in "0123456789abcdef" for c in registered_hash)
+                            or registered_h != expected_h or pinned != [registered_message]
+                            or registered_message in mapped or registered_message not in live):
+                        raise RuntimeError(f"Registered destination index evidence changed: {chat_id}")
+            allowed_index = {registered_message} if args.allow_registered_index and registered_message else set()
+            course_live = live - allowed_index
             run = runs[0]
             print(
                 f"AUDIT_DEST chat={chat_id} run={run['id']} phase={run['phase']} "
@@ -146,13 +167,15 @@ async def main():
                 f"copy_ambiguous={run['copy_ambiguous']} "
                 f"copy_window_utc={run['copy_first_update']}..{run['copy_last_update']} "
                 f"mapped={len(mapped)} visible={len(live)} "
-                f"extra_visible={sorted(live - mapped)} "
-                f"mapped_missing={sorted(mapped - live)} pinned={pinned}"
+                f"extra_visible={sorted(course_live - mapped)} "
+                f"mapped_missing={sorted(mapped - course_live)} pinned={pinned} "
+                f"registered_index={registered_message or 'none'}"
             )
+            pin_ok = (not pinned) if not allowed_index else pinned == [registered_message]
             clean = clean and (run["status"] == "active" and run["phase"] == "ready_for_new"
                                and int(run["manifest"]) == 59 and len(mapped) == expected_count
                                and mapped_source == live_source_ids
-                               and live == mapped and not pinned and not run["copy_ambiguous"])
+                               and course_live == mapped and pin_ok and not run["copy_ambiguous"])
     if args.require_clean and not clean:
         raise RuntimeError("TEST destinations no longer match the verified clean 1to2 ledger")
     print("AUDIT_READONLY_COMPLETE no_source_or_destination_write=true")
