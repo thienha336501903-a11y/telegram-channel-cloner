@@ -44,6 +44,7 @@ Preflight (no Telegram write):
   -Manifest "$env:LOCALAPPDATA\YeuNauAnReader\RebuildManifests\banh-bo-re-tre-mien-tay.rebuild-manifest.v1.json" \
   -DestinationTitle "REBUILD TEST - Banh Bo Re Tre" \
   -ProfileName "Reader Ngo Bi" \
+  -StartUnit 4 \
   -MaxUnits 1
 ```
 
@@ -54,9 +55,23 @@ Publish exactly the first unit only after preflight passes:
   -Manifest "$env:LOCALAPPDATA\YeuNauAnReader\RebuildManifests\banh-bo-re-tre-mien-tay.rebuild-manifest.v1.json" \
   -DestinationTitle "REBUILD TEST - Banh Bo Re Tre" \
   -ProfileName "Reader Ngo Bi" \
+  -StartUnit 4 \
   -MaxUnits 1 \
   -Publish
 ```
 
 The wrapper requires the operator to type `PUBLISH-TEST` before any destination
 write. Do not run full-course rebuild from this pilot.
+
+
+## Long-caption readiness hold
+
+The verified fixture's source message 2 has a media caption longer than the
+conservative 1024-character baseline. The initial TEST pilot therefore starts
+at rebuild unit 4 (source messages 7,8), a two-video album with a short caption.
+This proves local video upload, album grouping, caption preservation and
+idempotent ledger behavior without using the unresolved long-caption case.
+
+Full 14-unit rebuild remains blocked until the selected uploader account's
+effective Telegram caption limit is checked and a reviewed policy for captions
+above the non-Premium baseline is implemented.
