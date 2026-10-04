@@ -203,6 +203,7 @@ async def main():
     parser.add_argument("--destination", default="")
     parser.add_argument("--destination-title", required=True)
     parser.add_argument("--max-units", type=int, default=1)
+    parser.add_argument("--start-unit", type=int, default=1)
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
 
@@ -211,7 +212,7 @@ async def main():
 
     print("REBUILD_BACKUP_VERIFY_BEGIN")
     summary = validate_manifest(manifest, verify_media_bytes=True)
-    selected = pilot_units(manifest, args.max_units)
+    selected = pilot_units(manifest, args.max_units, args.start_unit)
     print(
         f"REBUILD_BACKUP_VERIFY_PASS manifest={summary['manifest_sha256']} "
         f"units={summary['unit_count']} media={summary['media_count']}"
