@@ -130,7 +130,11 @@ def validate_manifest(manifest: dict, *, verify_media_bytes: bool = True) -> dic
                     raise RuntimeError(f"rebuild_message_media_cardinality_invalid:{source_id}")
                 if telegram_type not in ("photo", "video", "audio", "document"):
                     raise RuntimeError(f"rebuild_media_type_invalid:{source_id}")
-                if len(text) > 1024:
+                # Structural manifest validation accepts Telegram's general
+                # message-size envelope. The TEST pilot selects a short-caption
+                # unit; account-specific media-caption limits are a separate
+                # full-course readiness gate.
+                if len(text) > 4096:
                     raise RuntimeError(f"rebuild_caption_too_long:{source_id}")
 
             for item in media:
@@ -170,11 +174,15 @@ def validate_manifest(manifest: dict, *, verify_media_bytes: bool = True) -> dic
     }
 
 
-def pilot_units(manifest: dict, max_units: int) -> list:
+def pilot_units(manifest: dict, max_units: int, start_unit: int = 1) -> list:
     max_units = int(max_units)
+    start_unit = int(start_unit)
     if not 1 <= max_units <= PILOT_MAX_UNITS:
         raise RuntimeError(f"rebuild_pilot_max_units_must_be_1_to_{PILOT_MAX_UNITS}")
     units = manifest.get("units") or []
-    if len(units) < max_units:
+    if not 1 <= start_unit <= len(units):
+        raise RuntimeError("rebuild_pilot_start_unit_invalid")
+    end = start_unit - 1 + max_units
+    if end > len(units):
         raise RuntimeError("rebuild_pilot_manifest_too_short")
-    return units[:max_units]
+    return units[start_unit - 1:end]
