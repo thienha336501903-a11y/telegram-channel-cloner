@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTwoDestinationPreviews } from '../scripts/e2e-local/preview-two-course-index.mjs';
+import { buildCourseIndex } from '../scripts/e2e-local/course-index-core.mjs';
 
 function fixture() {
   const source = { id: 'source-test', chat_id: '-1004320185488', title: 'TEST course', active: false };
@@ -58,4 +59,65 @@ test('after exactly one mapped new post, previews both destinations from the ret
   assert.deepEqual(previews.map(row => row.index.postCount), [61, 61]);
   assert.deepEqual(previews.map(row => row.index.highWatermark), [62, 62]);
   assert.throws(() => buildTwoDestinationPreviews(data), /source or destination set changed/);
+});
+
+
+function oneEntryTitle(text, { secondMessageText = null, album = false } = {}) {
+  const messages = [{
+    source_message_id: 2,
+    message_type: 'text',
+    text,
+    media_group_id: album ? 'album-1' : null
+  }];
+  if (secondMessageText !== null) {
+    messages.push({
+      source_message_id: 3,
+      message_type: 'text',
+      text: secondMessageText,
+      media_group_id: album ? 'album-1' : null
+    });
+  }
+  const mappings = messages.map((message, index) => ({
+    source_message_id: message.source_message_id,
+    destination_message_id: 10 + index,
+    status: 'copied'
+  }));
+  return buildCourseIndex({
+    source: { title: 'TEST' },
+    destination: { chat_id: '-1003933578709' },
+    messages,
+    mappings
+  }).entries[0].title;
+}
+
+test('adds the next meaningful line when the first line is only a lesson number', () => {
+  assert.equal(
+    oneEntryTitle('Bài 1 :\n📍 QUY TRÌNH SƠ CHẾ & HẤP CÁ NỤC'),
+    'Bài 1 : 📍 QUY TRÌNH SƠ CHẾ & HẤP CÁ NỤC'
+  );
+  assert.equal(
+    oneEntryTitle('BÀI 02\n\nhttps://t.me/example\n🔥 TÊN BÀI THẬT'),
+    'BÀI 02 🔥 TÊN BÀI THẬT'
+  );
+});
+
+test('does not look ahead when the first line already contains a lesson title', () => {
+  assert.equal(
+    oneEntryTitle('Bài 17 📍 SỐT CÀ CHUA CÁ NỤC & XÍU MẠI\nNguyên liệu'),
+    'Bài 17 📍 SỐT CÀ CHUA CÁ NỤC & XÍU MẠI'
+  );
+});
+
+test('lesson-number fallback never steals a title from another Telegram post', () => {
+  assert.equal(oneEntryTitle('Bài 8:', { secondMessageText: 'KHÔNG ĐƯỢC GHÉP' }), 'Bài 8:');
+  assert.equal(
+    oneEntryTitle('Bài 12:\n🎯 TÊN ALBUM', { secondMessageText: 'caption member 2', album: true }),
+    'Bài 12: 🎯 TÊN ALBUM (2 bài)'
+  );
+});
+
+test('long derived lesson titles still use the existing index truncation', () => {
+  const title = oneEntryTitle(`Bài 1:\n${'A'.repeat(100)}`);
+  assert.ok(Array.from(title).length <= 64);
+  assert.ok(title.endsWith('…'));
 });

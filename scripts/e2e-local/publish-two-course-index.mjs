@@ -1,5 +1,6 @@
 // Guarded TEST-only publisher for one destination-owned index per retained 1→2 destination.
 // It never touches Production and only accepts the exact learner-free TEST fixture.
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,13 +8,23 @@ import { pathToFileURL } from 'node:url';
 import { buildTwoDestinationPreviews } from './preview-two-course-index.mjs';
 import { verifyTwoTestBotAccess } from './verify-two-test-bot-access.mjs';
 import {
-  getChatSafely, isKnownTelegramFailure, pinMessageSafely, sendTextSafely
+  editTextSafely, getChatSafely, isKnownTelegramFailure, pinMessageSafely, sendTextSafely
 } from '../../lib/distributor-telegram.js';
 
 const SOURCE = '-1004320185488';
 const DESTINATIONS = ['-1003933578709', '-1004492904064'];
 const DB_CONTAINER = 'tgcloner-e2e-1to2-db';
 const STATE_VERSION = 1;
+const LEGACY_INDEX = Object.freeze({
+  '-1003933578709': {
+    messageId: 69,
+    hash: '8fb4d444dadb850945e8b0bfbd7fe0ff64419a98b9a436ad752ed845e077549f'
+  },
+  '-1004492904064': {
+    messageId: 191,
+    hash: '6ee7ce50beaa3ebd48af0611f143bd95c20a72d0c7545b5a1621cca1b6bef4b9'
+  }
+});
 
 const sql = `
 with s as (select id,chat_id,title,active from public.tgcloner_sources where chat_id='${SOURCE}'),
@@ -68,6 +79,15 @@ function expectedLinkEntities(index) {
   return index.entities.map((entity) => `${entity.offset}:${entity.length}:${entity.url}`).sort();
 }
 
+export function pinnedIndexHash(chat, messageId) {
+  const pinned = chat?.pinned_message;
+  if (Number(pinned?.message_id || 0) !== Number(messageId) || typeof pinned?.text !== 'string') return null;
+  const entities = (pinned.entities || [])
+    .filter((entity) => entity.type === 'text_link')
+    .map((entity) => ({ type: 'text_link', offset: Number(entity.offset), length: Number(entity.length), url: String(entity.url || '') }));
+  return createHash('sha256').update(JSON.stringify({ text: pinned.text, entities })).digest('hex');
+}
+
 export function pinMatches(chat, index, messageId) {
   const pinned = chat?.pinned_message;
   if (Number(pinned?.message_id || 0) !== Number(messageId) || pinned?.text !== index.text) return false;
@@ -76,11 +96,11 @@ export function pinMatches(chat, index, messageId) {
   return JSON.stringify(actual) === JSON.stringify(expectedLinkEntities(index));
 }
 
-export function validateState(state, row) {
+export function validateState(state, row, { allowContentUpdate = false } = {}) {
   if (!state) return null;
   if (state.version !== STATE_VERSION || state.sourceChatId !== SOURCE ||
       state.destinationChatId !== row.destination || state.runId !== row.runId ||
-      !['armed', 'known_failure', 'sent', 'published'].includes(state.phase)) {
+      !['armed', 'known_failure', 'sent', 'published', 'editing'].includes(state.phase)) {
     throw new Error(`Unknown index ledger for ${row.destination}; reconcile before any write`);
   }
   if (state.messageId != null && (!Number.isSafeInteger(Number(state.messageId)) || Number(state.messageId) < 1)) {
@@ -92,8 +112,12 @@ export function validateState(state, row) {
   if (state.phase !== 'known_failure' && !state.messageId) {
     throw new Error(`Index ledger is incomplete for ${row.destination}; reconcile before retrying`);
   }
-  if (state.contentHash && state.contentHash !== row.index.hash) {
-    throw new Error(`Index content changed for ${row.destination}; this TEST publisher does not edit in place`);
+  if (state.contentHash && state.contentHash !== row.index.hash && !allowContentUpdate) {
+    throw new Error(`Index content changed for ${row.destination}; use the reviewed TEST update-existing path`);
+  }
+  if (allowContentUpdate && state.contentHash !== row.index.hash &&
+      !['published', 'editing'].includes(state.phase)) {
+    throw new Error(`Index update state is unsafe for ${row.destination}`);
   }
   return state;
 }
@@ -122,17 +146,100 @@ function registerIndex(row, messageId) {
   if (registered !== expected) throw new Error(`Index registration failed for ${row.destination}`);
 }
 
-function verifyRegisteredSnapshot(row, messageId) {
+function verifyRegisteredSnapshot(row, messageId, {
+  expectedHash = row.index.hash,
+  expectedHighWatermark = row.index.highWatermark
+} = {}) {
   const destination = row.destinationRow;
   const fields = [destination.course_index_message_id, destination.course_index_content_hash,
     destination.course_index_high_watermark];
   if (fields.every((value) => value == null)) return false;
   if (Number(destination.course_index_message_id) !== Number(messageId) ||
-      destination.course_index_content_hash !== row.index.hash ||
-      Number(destination.course_index_high_watermark) !== row.index.highWatermark) {
-    throw new Error(`Registered TEST index differs from local ledger for ${row.destination}`);
+      destination.course_index_content_hash !== expectedHash ||
+      Number(destination.course_index_high_watermark) !== Number(expectedHighWatermark)) {
+    throw new Error(`Registered TEST index differs from expected evidence for ${row.destination}`);
   }
   return true;
+}
+
+async function updateExistingOne(row, stateDir) {
+  const expected = LEGACY_INDEX[row.destination];
+  if (!expected) throw new Error(`No reviewed legacy TEST index identity for ${row.destination}`);
+
+  const statePath = join(stateDir, `course-index-${row.destination}.json`);
+  let state = validateState(await loadState(statePath), row, { allowContentUpdate: true });
+  if (!state?.messageId || Number(state.messageId) !== expected.messageId) {
+    throw new Error(`TEST index message identity changed for ${row.destination}`);
+  }
+  if (Number(state.highWatermark) !== 62 || row.index.highWatermark !== 62) {
+    throw new Error(`TEST index watermark changed for ${row.destination}`);
+  }
+
+  const previousHash = state.phase === 'editing'
+    ? String(state.previousContentHash || '')
+    : String(state.contentHash || '');
+  const targetHash = state.phase === 'editing'
+    ? String(state.targetContentHash || '')
+    : row.index.hash;
+
+  if (previousHash !== expected.hash || targetHash !== row.index.hash || previousHash === targetHash) {
+    throw new Error(`Unexpected TEST index hash transition for ${row.destination}`);
+  }
+
+  verifyRegisteredSnapshot(row, state.messageId, {
+    expectedHash: previousHash,
+    expectedHighWatermark: 62
+  });
+
+  const chat = await getChatSafely({ chatId: row.destination });
+  if (chat?.type !== 'channel' || String(chat.id) !== row.destination ||
+      Number(chat?.pinned_message?.message_id || 0) !== Number(state.messageId)) {
+    throw new Error(`Pinned TEST index identity changed for ${row.destination}`);
+  }
+
+  const currentHash = pinnedIndexHash(chat, state.messageId);
+  if (currentHash === targetHash) {
+    registerIndex(row, state.messageId);
+    state = { ...state, phase: 'published', contentHash: targetHash, highWatermark: 62 };
+    delete state.previousContentHash;
+    delete state.targetContentHash;
+    await saveState(statePath, state);
+    console.log(`E2E_1TO2_INDEX_DESTINATION_PASS destination=${row.destination} message_id=${state.messageId} existing=true updated=true recovered=true`);
+    return;
+  }
+  if (currentHash !== previousHash) {
+    throw new Error(`Pinned TEST index content is neither reviewed old nor target content for ${row.destination}`);
+  }
+
+  if (state.phase !== 'editing') {
+    state = {
+      ...state,
+      phase: 'editing',
+      previousContentHash: previousHash,
+      targetContentHash: targetHash
+    };
+    await saveState(statePath, state);
+  }
+
+  await editTextSafely({
+    chatId: row.destination,
+    messageId: Number(state.messageId),
+    text: row.index.text,
+    entities: row.index.entities,
+    disableLinkPreview: true
+  });
+
+  const afterEdit = await getChatSafely({ chatId: row.destination });
+  if (!pinMatches(afterEdit, row.index, state.messageId)) {
+    throw new Error(`Edited TEST index verification failed for ${row.destination}; do not retry blindly`);
+  }
+
+  registerIndex(row, state.messageId);
+  state = { ...state, phase: 'published', contentHash: targetHash, highWatermark: 62 };
+  delete state.previousContentHash;
+  delete state.targetContentHash;
+  await saveState(statePath, state);
+  console.log(`E2E_1TO2_INDEX_DESTINATION_PASS destination=${row.destination} message_id=${state.messageId} existing=true updated=true`);
 }
 
 async function publishOne(row, stateDir) {
@@ -208,6 +315,8 @@ async function publishOne(row, stateDir) {
 async function main() {
   const afterOne = process.argv.includes('--after-one');
   const publish = process.argv.includes('--publish');
+  const updateExisting = process.argv.includes('--update-existing');
+  if (updateExisting && !publish) throw new Error('--update-existing requires --publish');
   if (!afterOne) throw new Error('The retained 1to2 index path requires --after-one after the verified source #62 gate');
   const rows = buildPublishRows(readSnapshot());
   for (const row of rows) {
@@ -229,12 +338,17 @@ async function main() {
     throw error;
   });
   try {
-    for (const row of rows) await publishOne(row, stateDir);
+    for (const row of rows) {
+      if (updateExisting) await updateExistingOne(row, stateDir);
+      else await publishOne(row, stateDir);
+    }
   } finally {
     await lock.close();
     await unlink(lockPath).catch(() => {});
   }
-  console.log('E2E_1TO2_INDEX_PUBLISHED_PASS destinations=2 H=62');
+  console.log(updateExisting
+    ? 'E2E_1TO2_INDEX_UPDATED_PASS destinations=2 H=62'
+    : 'E2E_1TO2_INDEX_PUBLISHED_PASS destinations=2 H=62');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

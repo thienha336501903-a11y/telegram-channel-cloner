@@ -1,9 +1,10 @@
-param([switch]$Publish, [switch]$AfterOne)
+param([switch]$Publish, [switch]$AfterOne, [switch]$UpdateExisting)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $dbName = 'tgcloner-e2e-1to2-db'
 if (-not $AfterOne) { throw 'This path is only for the verified 61-post/H=62 TEST state; add -AfterOne.' }
+if ($UpdateExisting -and -not $Publish) { throw '-UpdateExisting requires -Publish.' }
 if (-not (Get-Command docker -ErrorAction SilentlyContinue) -or -not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw 'Docker, Node.js and Python are required on the retained Windows TEST machine.'
 }
@@ -51,8 +52,10 @@ try {
   Remove-Item Env:TELEGRAM_BOT_TOKEN -ErrorAction SilentlyContinue
   $env:TELEGRAM_BOT_TOKEN = Read-PlainSecret 'Dán token @yeubep_distributor_test_bot (chỉ bot TEST)'
   $env:E2E_1TO2_INDEX_STATE_DIR = Join-Path $backupDir 'course-index-1to2'
-  node scripts/e2e-local/publish-two-course-index.mjs --after-one --publish
-  if ($LASTEXITCODE -ne 0) { throw '1to2 index publish stopped. Preserve DB/channels/state and do not blindly retry an ambiguous send.' }
+  $nodeArgs = @('scripts/e2e-local/publish-two-course-index.mjs', '--after-one', '--publish')
+  if ($UpdateExisting) { $nodeArgs += '--update-existing' }
+  & node @nodeArgs
+  if ($LASTEXITCODE -ne 0) { throw '1to2 index publish/update stopped. Preserve DB/channels/state and do not blindly retry an ambiguous send.' }
 }
 finally {
   Remove-Item Env:TELEGRAM_BOT_TOKEN -ErrorAction SilentlyContinue

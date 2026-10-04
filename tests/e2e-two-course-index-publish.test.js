@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPublishRows, pinMatches, validateState } from '../scripts/e2e-local/publish-two-course-index.mjs';
+import { buildPublishRows, pinMatches, pinnedIndexHash, validateState } from '../scripts/e2e-local/publish-two-course-index.mjs';
 
 function fixture() {
   const source = { id: 'source-test', chat_id: '-1004320185488', title: 'TEST course', active: false };
@@ -61,4 +61,28 @@ test('pinned-message verification requires exact text-link entities', () => {
   assert.equal(pinMatches({ pinned_message: pinned }, row.index, messageId), true);
   pinned.entities[0].url += '-wrong';
   assert.equal(pinMatches({ pinned_message: pinned }, row.index, messageId), false);
+});
+
+
+test('explicit TEST update mode accepts only a published ledger with content drift', () => {
+  const row = buildPublishRows(fixture())[0];
+  const state = {
+    version: 1, sourceChatId: '-1004320185488', destinationChatId: row.destination,
+    runId: row.runId, phase: 'published', messageId: 69, highWatermark: 62,
+    contentHash: '8fb4d444dadb850945e8b0bfbd7fe0ff64419a98b9a436ad752ed845e077549f'
+  };
+  assert.equal(validateState(state, row, { allowContentUpdate: true }), state);
+  assert.throws(() => validateState({ ...state, phase: 'known_failure' }, row, { allowContentUpdate: true }), /unsafe/);
+});
+
+test('pinned index hash normalizes Bot API text-link entities', () => {
+  const row = buildPublishRows(fixture())[0];
+  const pinned = {
+    message_id: 69,
+    text: row.index.text,
+    entities: row.index.entities.map((entity) => ({ ...entity }))
+  };
+  assert.equal(pinnedIndexHash({ pinned_message: pinned }, 69), row.index.hash);
+  pinned.text += ' changed';
+  assert.notEqual(pinnedIndexHash({ pinned_message: pinned }, 69), row.index.hash);
 });
