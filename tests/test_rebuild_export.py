@@ -96,8 +96,11 @@ class RebuildExportCoreTest(unittest.TestCase):
             self.assertEqual(summary["unit_count"], 2)
             self.assertEqual(len(pilot_units(manifest, 1)), 1)
             self.assertEqual(len(pilot_units(manifest, 2)), 2)
+            self.assertEqual(pilot_units(manifest, 1, 2)[0]["unit_number"], 2)
             with self.assertRaisesRegex(RuntimeError, "must_be_1_to_2"):
                 pilot_units(manifest, 3)
+            with self.assertRaisesRegex(RuntimeError, "start_unit_invalid"):
+                pilot_units(manifest, 1, 0)
 
     def test_modified_media_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
