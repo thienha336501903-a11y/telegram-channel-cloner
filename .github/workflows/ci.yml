@@ -95,6 +95,7 @@ jobs:
           python -m py_compile reader-cli/course_full.py scripts/e2e-local/inventory-course.py
           python -m py_compile scripts/e2e-local/inspect-two-destinations.py scripts/e2e-local/verify-two-resume.py scripts/e2e-local/verify_telegram.py
           python -m py_compile reader-cli/reconcile_history.py
+          python -m py_compile reader-cli/rebuild_export_core.py reader-cli/rebuild_from_export.py
           python -m py_compile reader-cli/reader_agent.py
           python -m py_compile reader-cli/mirror_v5_r2.py
           python -m py_compile reader-manager/reader_manager_agent.py
@@ -104,6 +105,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_reader_*.py'
           python -m unittest discover -s tests -p 'test_course_full.py'
+          python -m unittest discover -s tests -p 'test_rebuild_export.py'
       - name: Secret hygiene
         shell: bash
         run: |
