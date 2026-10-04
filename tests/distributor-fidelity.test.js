@@ -100,12 +100,44 @@ test('rewrite response that still exposes an Original link is quarantined ambigu
 });
 
 test('pin fidelity pins the mapped destination message', async () => {
-  const { deps, calls } = harness();
+  const { deps, calls } = harness({ getChat: async () => ({ id: '-100222' }) });
   const pinWork = work('pin_set', 'pin', { source_message_id: 20, manifest_message_ids: [20] });
   const result = await processDistributorWork(pinWork, { workerId: 'worker-pin', deps });
   assert.equal(result.ok, true);
   assert.equal(calls.find((x) => x[0] === 'pinMessage')[1].messageId, 9020);
   assert.ok(calls.some((x) => x[0] === 'finishPin'));
+});
+
+test('source pin clear never unpins a destination-owned index', async () => {
+  const { deps, calls } = harness({ getChat: async () => ({ id: '-100222', pinned_message: { message_id: 67 } }) });
+  const result = await processDistributorWork(work('pin_clear', 'pin', { source_message_id: null, manifest_message_ids: [] }), { workerId: 'worker-safe-clear', deps });
+  assert.equal(result.dependency, true);
+  assert.equal(calls.find((x) => x[0] === 'blockDependency')[1].errorCode, 'destination_pin_conflict');
+  assert.equal(calls.some((x) => ['arm','unpinAll','finishPin'].includes(x[0])), false);
+});
+
+test('registered index rejects old pin work even when Telegram read omits the pin', async () => {
+  const { deps, calls } = harness({ getDestination: async () => ({ id: 'dest-1', source_id: 'source-1', chat_id: '-100222', course_index_message_id: 67 }), getChat: async () => ({ id: '-100222' }) });
+  const result = await processDistributorWork(work('pin_clear', 'pin', { source_message_id: null, manifest_message_ids: [] }), { workerId: 'worker-index', deps });
+  assert.equal(result.dependency, true);
+  assert.equal(calls.find((x) => x[0] === 'blockDependency')[1].errorCode, 'destination_index_owns_pin');
+  assert.equal(calls.some((x) => ['arm','unpinAll','finishPin'].includes(x[0])), false);
+});
+
+test('already clear destination completes pin parity without an unpin-all API call', async () => {
+  const { deps, calls } = harness({ getChat: async () => ({ id: '-100222' }) });
+  const result = await processDistributorWork(work('pin_clear', 'pin', { source_message_id: null, manifest_message_ids: [] }), { workerId: 'worker-empty', deps });
+  assert.equal(result.ok, true);
+  assert.equal(calls.find((x) => x[0] === 'finishPin')[1].result.already_correct, true);
+  assert.equal(calls.some((x) => x[0] === 'unpinAll'), false);
+});
+
+test('a different destination pin blocks source pin set before Telegram writes', async () => {
+  const { deps, calls } = harness({ getChat: async () => ({ id: '-100222', pinned_message: { message_id: 67 } }) });
+  const result = await processDistributorWork(work('pin_set', 'pin', { source_message_id: 20, manifest_message_ids: [20] }), { workerId: 'worker-conflict', deps });
+  assert.equal(result.dependency, true);
+  assert.equal(calls.find((x) => x[0] === 'blockDependency')[1].errorCode, 'destination_pin_conflict');
+  assert.equal(calls.some((x) => ['arm','pinMessage','unpinAll'].includes(x[0])), false);
 });
 
 test('final verify reads both source and destination pin before READY_FOR_NEW', async () => {
