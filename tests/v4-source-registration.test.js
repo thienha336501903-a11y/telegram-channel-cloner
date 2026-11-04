@@ -27,7 +27,8 @@ test('V4 source registration supports fail-closed internal Commerce orchestratio
   assert.match(auth, /export function isInternalSyncAuthorized/);
   assert.match(auth, /process\.env\.INTERNAL_SYNC_SECRET/);
   assert.match(auth, /req\.headers\['x-sync-secret'\]/);
-  assert.match(auth, /if \(!expected \|\| !candidate\) return false/);
+  assert.match(auth, /if \(!candidate\) return false/);
+  assert.match(auth, /b\.length > 0 && a\.length === b\.length/);
   assert.match(auth, /crypto\.timingSafeEqual/);
   assert.match(handler, /!isAuthenticated\(req\) && !isInternalSyncAuthorized\(req\)/);
 });

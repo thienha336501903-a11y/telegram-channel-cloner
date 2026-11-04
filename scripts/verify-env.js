@@ -38,6 +38,7 @@ if (webhookSecret && !/^[A-Za-z0-9_-]+$/.test(webhookSecret)) {
 minLength('READER_INGEST_SECRET', 32);
 minLength('CRON_SECRET', 32);
 minLength('INTERNAL_SYNC_SECRET', 32);
+if (clean(process.env.INTERNAL_SYNC_SECRET_NEXT) && clean(process.env.INTERNAL_SYNC_SECRET_NEXT).length < 32) failures.push('INTERNAL_SYNC_SECRET_NEXT: must be at least 32 characters when set');
 
 for (const name of ['CLONER_PUBLIC_URL', 'LMS_PUBLIC_URL', 'V4_PUBLIC_URL']) {
   const value = clean(process.env[name]);
