@@ -53,6 +53,7 @@ test('Cloner admin exposes a separate V4 source form', () => {
   assert.match(page, /id="v4SourceChatId"/);
   assert.match(page, /\/api\/admin\/v4-source/);
   assert.match(page, /Đăng ký nguồn V4/);
-  assert.match(page, /Nguồn V4/);
+  // The role pill no longer says "Nguồn V4" for every non-MASTER source (P1, D6-C); the V4 form keeps its title.
+  assert.match(page, /Nguồn Telegram V4/);
   assert.match(page, /mode.*v4-source/);
 });
