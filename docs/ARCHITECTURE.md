@@ -26,4 +26,11 @@ Telegram Bot API webhook receives `channel_post` / `edited_channel_post` for the
 - Reader ingestion: separate bearer secret.
 - Telegram webhook: `X-Telegram-Bot-Api-Secret-Token` required.
 - RLS enabled with no anon/authenticated policies.
-- Dedicated Telegram reader account recommended; its local session is never deployed.
+- Dedicated Telegram reader account recommended.
+- MTProto user session: the Windows Reader keeps its own session locally. For media above the Bot API 20 MB
+  limit the server also caches an MTProto session in the database, encrypted with AES-256-GCM using
+  `SESSION_SECRET` (`lib/mtproto-media.js`). Rotating `SESSION_SECRET` makes that cached session unreadable:
+  plan a re-login (or a two-key rotation) before changing it.
+- Optional channel allowlist: `READER_CHANNEL_ALLOWLIST` (comma-separated `-100…` ids and/or `@usernames`).
+  Unset = no restriction. Set = only those channels can be registered, receive live posts, get Reader jobs
+  or ingest data (`lib/channel-allowlist.js`).

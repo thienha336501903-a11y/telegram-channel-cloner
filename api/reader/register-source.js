@@ -1,5 +1,6 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { authenticateReaderRequest } from '../../lib/reader-manager.js';
+import { isReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 import { botApiChatIdToPrivateLinkId } from '../../lib/links.js';
 import { getSourceByChatId, upsertSource } from '../../lib/repository.js';
 import { getChat } from '../../lib/telegram.js';
@@ -14,6 +15,7 @@ export default async function handler(req, res) {
   // register a Reader-only source that the bot itself cannot access, otherwise
   // indexing would succeed but learner media would fail only at playback time.
   const chatId = String(body.chat_id);
+  if (!isReaderChannelAllowed({ chat_id: chatId, username: body.username })) return json(res, 403, { ok: false, error: 'reader_channel_not_allowlisted' });
   let botChat;
   try {
     botChat = await getChat(chatId);

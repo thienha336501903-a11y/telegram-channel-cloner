@@ -31,5 +31,11 @@ export default async function handler(req, res) {
   const action = Array.isArray(req.query?.action) ? req.query.action[0] : req.query?.action;
   const target = handlers[String(action || '')];
   if (!target) return json(res, 404, { ok: false, error: 'admin_route_not_found' });
-  return target(req, res);
+  try {
+    return await target(req, res);
+  } catch (error) {
+    // Channel outside READER_CHANNEL_ALLOWLIST (lib/channel-allowlist.js): a clear 403, not a 500.
+    if (error?.code === 'reader_channel_not_allowlisted') return json(res, 403, { ok: false, error: error.code });
+    throw error;
+  }
 }

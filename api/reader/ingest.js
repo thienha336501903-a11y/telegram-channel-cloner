@@ -6,6 +6,7 @@ import { recordInternalLinks, upsertSourceMessage } from '../../lib/repository.j
 import { patch, select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { telegram } from '../../lib/telegram.js';
+import { isReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 
 const HYDRATABLE_MEDIA_TYPES = new Set([
   'photo',
@@ -80,6 +81,7 @@ export default async function handler(req, res) {
   const sources = await select(TABLES.sources, `select=*&id=eq.${encodeURIComponent(body.source_id)}&limit=1`);
   const source = sources[0];
   if (!source) return json(res, 404, { ok: false, error: 'source_not_found' });
+  if (!isReaderChannelAllowed(source)) return json(res, 403, { ok: false, error: 'reader_channel_not_allowlisted' });
 
   const noSourceMutation = String(process.env.TGCLONER_READER_NO_SOURCE_MUTATION || '').toLowerCase() === 'true';
   let savedCount = 0;
