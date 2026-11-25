@@ -1,3 +1,5 @@
+import { readerChannelAllowlistStatus } from '../lib/channel-allowlist.js';
+
 const failures = [];
 
 function present(name) {
@@ -50,6 +52,13 @@ for (const name of ['CLONER_PUBLIC_URL', 'LMS_PUBLIC_URL', 'V4_PUBLIC_URL']) {
       failures.push(`${name}: invalid URL`);
     }
   }
+}
+
+// A set but mistyped channel allowlist must never go live: at runtime it would either drop a channel (partial
+// typo) or stay off (all typos). Failing the build keeps the previous Production deployment serving.
+if (String(process.env.READER_CHANNEL_ALLOWLIST || '').trim()) {
+  const allowlist = readerChannelAllowlistStatus();
+  if (allowlist.ignored > 0) failures.push(`READER_CHANNEL_ALLOWLIST: ${allowlist.ignored} entr${allowlist.ignored === 1 ? 'y is' : 'ies are'} neither a channel id (-100…) nor an @username`);
 }
 
 if (failures.length) {
