@@ -2,6 +2,7 @@ import { isAuthenticated } from '../../lib/auth.js';
 import { json, method, readJson } from '../../lib/http.js';
 import { botApiChatIdToPrivateLinkId } from '../../lib/links.js';
 import { upsertSource } from '../../lib/repository.js';
+import { assertReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 import { patch } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { getChat } from '../../lib/telegram.js';
@@ -15,6 +16,8 @@ export default async function handler(req, res) {
   const chat = await getChat(body.chat_id);
   if (chat.type !== 'channel') return json(res, 400, { ok: false, error: 'source_must_be_channel' });
 
+  // Checked before the current MASTER is switched off: a refused channel must leave the MASTER untouched.
+  assertReaderChannelAllowed({ chat_id: String(chat.id), username: chat.username });
   await patch(TABLES.sources, 'active=eq.true', { active: false, updated_at: new Date().toISOString() }, { returning: false });
   const rows = await upsertSource({
     chat_id: String(chat.id),

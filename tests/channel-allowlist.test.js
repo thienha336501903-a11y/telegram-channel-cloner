@@ -36,7 +36,12 @@ test('every entry point checks the allowlist', () => {
   assert.match(read('lib/repository.js'), /export async function upsertSource\(source\) \{\n  assertReaderChannelAllowed\(source\);/);
   assert.match(read('lib/repository.js'), /return rows\?\.\[0\] && isReaderChannelAllowed\(rows\[0\]\) \? rows\[0\] : null;/);
   assert.match(read('lib/reader-jobs.js'), /queueReaderJob\(source[^)]*\) \{\n  assertReaderChannelAllowed\(source\);/);
-  assert.match(read('lib/reader-jobs.js'), /if \(!source \|\| !isReaderChannelAllowed\(source\)\) continue;/);
+  assert.match(read('lib/reader-jobs.js'), /if \(!source \|\| !isReaderChannelAllowed\(source\)\) \{[\s\S]*?status: 'failed', last_error: 'reader_channel_not_allowlisted'/);
+  // Refused before the current MASTER is switched off.
+  const source = read('server/admin/source.js');
+  assert.ok(source.indexOf('assertReaderChannelAllowed(') < source.indexOf("patch(TABLES.sources, 'active=eq.true'"));
+  // Reader-supplied username is not used for the check.
+  assert.match(read('api/reader/register-source.js'), /isReaderChannelAllowed\(\{ chat_id: String\(botChat\.id \?\? chatId\), username: botChat\.username \}\)/);
   assert.match(read('api/reader/ingest.js'), /if \(!isReaderChannelAllowed\(source\)\) return json\(res, 403/);
   assert.match(read('api/reader/register-source.js'), /reader_channel_not_allowlisted/);
   assert.match(read('api/admin.js'), /error\?\.code === 'reader_channel_not_allowlisted'\) return json\(res, 403/);

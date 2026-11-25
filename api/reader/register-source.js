@@ -15,7 +15,6 @@ export default async function handler(req, res) {
   // register a Reader-only source that the bot itself cannot access, otherwise
   // indexing would succeed but learner media would fail only at playback time.
   const chatId = String(body.chat_id);
-  if (!isReaderChannelAllowed({ chat_id: chatId, username: body.username })) return json(res, 403, { ok: false, error: 'reader_channel_not_allowlisted' });
   let botChat;
   try {
     botChat = await getChat(chatId);
@@ -29,6 +28,10 @@ export default async function handler(req, res) {
   }
   if (botChat?.type !== 'channel') {
     return json(res, 400, { ok: false, error: 'source_must_be_channel' });
+  }
+  // Only what Telegram says about the chat counts (a username sent by the Reader is not trusted here).
+  if (!isReaderChannelAllowed({ chat_id: String(botChat.id ?? chatId), username: botChat.username })) {
+    return json(res, 403, { ok: false, error: 'reader_channel_not_allowlisted' });
   }
 
   // Historical indexing is source-scoped. It must never promote a V4 source to
