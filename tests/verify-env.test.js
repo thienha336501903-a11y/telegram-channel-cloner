@@ -22,6 +22,16 @@ function verify(extraEnv = {}) {
   });
 }
 
+test('READER_CHANNEL_ALLOWLIST: unset or valid passes; any mistyped entry fails the build (no fail-open, no silent drop)', () => {
+  assert.equal(verify({ READER_CHANNEL_ALLOWLIST: '' }).status, 0);
+  assert.equal(verify({ READER_CHANNEL_ALLOWLIST: '-1004310054018, @MyCourse, 123456' }).status, 0);
+  for (const bad of ['abc', '-1004310054018,abc', 'https://t.me/kenh']) {
+    const result = verify({ READER_CHANNEL_ALLOWLIST: bad });
+    assert.equal(result.status, 1, bad);
+    assert.match(result.stderr, /READER_CHANNEL_ALLOWLIST: 1 entry is neither/);
+  }
+});
+
 test('System B remains build-compatible when Clone Factory URL variables are absent', () => {
   const result = verify({
     CLONER_PUBLIC_URL: '',

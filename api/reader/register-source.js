@@ -1,5 +1,6 @@
 import { json, method, readJson } from '../../lib/http.js';
 import { authenticateReaderRequest } from '../../lib/reader-manager.js';
+import { isReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 import { botApiChatIdToPrivateLinkId } from '../../lib/links.js';
 import { getSourceByChatId, upsertSource } from '../../lib/repository.js';
 import { getChat } from '../../lib/telegram.js';
@@ -27,6 +28,10 @@ export default async function handler(req, res) {
   }
   if (botChat?.type !== 'channel') {
     return json(res, 400, { ok: false, error: 'source_must_be_channel' });
+  }
+  // Only what Telegram says about the chat counts (a username sent by the Reader is not trusted here).
+  if (!isReaderChannelAllowed({ chat_id: String(botChat.id ?? chatId), username: botChat.username })) {
+    return json(res, 403, { ok: false, error: 'reader_channel_not_allowlisted' });
   }
 
   // Historical indexing is source-scoped. It must never promote a V4 source to

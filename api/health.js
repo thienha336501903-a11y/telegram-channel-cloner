@@ -1,5 +1,6 @@
 import { json } from '../lib/http.js';
 import { select } from '../lib/supabase.js';
+import { readerChannelAllowlistStatus } from '../lib/channel-allowlist.js';
 
 export default async function handler(req, res) {
   let database = false;
@@ -28,6 +29,7 @@ export default async function handler(req, res) {
       readerIngest: Boolean(process.env.READER_INGEST_SECRET),
       adminAuth: Boolean(process.env.ADMIN_PASSWORD && process.env.SESSION_SECRET),
       cron: Boolean(process.env.CRON_SECRET)
-    }
+    },
+    channelAllowlist: readerChannelAllowlistStatus()
   });
 }
