@@ -20,5 +20,9 @@
     "@vercel/functions": "^3.9.5",
     "big-integer": "^1.6.48",
     "teleproto": "1.229.0"
+  },
+  "overrides": {
+    "zod": "^4.6.6",
+    "ip-address": "^10.7.4"
   }
 }

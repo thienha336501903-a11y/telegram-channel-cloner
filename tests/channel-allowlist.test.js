@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { assertReaderChannelAllowed, isReaderChannelAllowed, readerChannelAllowlist } from '../lib/channel-allowlist.js';
+import { assertReaderChannelAllowed, isReaderChannelAllowed, readerChannelAllowlist, readerChannelAllowlistStatus } from '../lib/channel-allowlist.js';
 
 const env = list => ({ READER_CHANNEL_ALLOWLIST: list });
 
@@ -21,6 +21,14 @@ test('ids match with or without -100, usernames case-insensitively; others are r
   assert.equal(isReaderChannelAllowed({ chat_id: '-1007777' }, e), false);
   assert.equal(isReaderChannelAllowed({ chat_id: '' }, e), false);
   assert.throws(() => assertReaderChannelAllowed({ chat_id: '-1007777' }, e), err => err.code === 'reader_channel_not_allowlisted' && err.status === 403);
+});
+
+test('health status counts entries and typos without exposing ids', () => {
+  assert.deepEqual(readerChannelAllowlistStatus({}), { enabled: false, entries: 0, ignored: 0 });
+  assert.deepEqual(readerChannelAllowlistStatus(env('-1004310054018, @Kenh, abc')), { enabled: true, entries: 2, ignored: 1 });
+  // Only typos = no valid entry = restriction stays off (never locks every channel by mistake).
+  assert.deepEqual(readerChannelAllowlistStatus(env('abc')), { enabled: false, entries: 0, ignored: 1 });
+  assert.equal(readerChannelAllowlist(env('abc')), null);
 });
 
 test('every entry point checks the allowlist', () => {
