@@ -19,10 +19,11 @@ function fakeDb(tables) {
       if (['select', 'order', 'limit', 'offset'].includes(key)) continue;
       const [op, ...rest] = value.split('.');
       const arg = rest.join('.');
-      if (op === 'eq') out = out.filter(r => String(r[key]) === arg);
-      else if (op === 'neq') out = out.filter(r => String(r[key]) !== arg);
-      else if (op === 'gte') out = out.filter(r => String(r[key]) >= arg);
-      else if (op === 'in') { const set = new Set(arg.replace(/^\(|\)$/g, '').split(',')); out = out.filter(r => set.has(String(r[key]))); }
+      const get = key.startsWith('job.') ? (r => r.job?.[key.slice(4)]) : (r => r[key]);
+      if (op === 'eq') out = out.filter(r => String(get(r)) === arg);
+      else if (op === 'neq') out = out.filter(r => String(get(r)) !== arg);
+      else if (op === 'gte') out = out.filter(r => String(get(r)) >= arg);
+      else if (op === 'in') { const set = new Set(arg.replace(/^\(|\)$/g, '').split(',')); out = out.filter(r => set.has(String(get(r)))); }
       else throw new Error(`fake db: unsupported filter ${key}=${value}`);
     }
     const order = params.get('order');
@@ -43,7 +44,12 @@ function fakeDb(tables) {
       return new Response(null, { status: 200, headers: { 'content-range': `*/${n}` } });
     }
     if (method === 'GET') {
-      const rows = filterRows(tables[table], u.searchParams);
+      let base = tables[table];
+      // Embedded !inner join used by the open-item guard: job:tgcloner_clone_jobs!inner(...)
+      if (String(u.searchParams.get('select') || '').includes('job:tgcloner_clone_jobs!inner')) {
+        base = base.map(r => ({ ...r, job: (tables.tgcloner_clone_jobs || []).find(j => j.id === r.job_id) })).filter(r => r.job);
+      }
+      const rows = filterRows(base, u.searchParams);
       const offset = Number(u.searchParams.get('offset') || 0);
       const limit = Math.min(Number(u.searchParams.get('limit') || CAP), CAP);
       return new Response(JSON.stringify(rows.slice(offset, offset + limit)), { status: 200 });
@@ -215,22 +221,57 @@ test('clone guard: hard limit, empty source, missing rows, same channel, other s
   assert.equal(db.calls.filter(c => c.method === 'POST').length, 0);
 });
 
-test('clone guard: live mirror does not block, stale full clone does not block, other source channels are refused', async (t) => {
+test('clone guard: one full clone with open work per destination; live mirror and dead jobs do not block', async (t) => {
   withEnv(t);
   const { default: handler } = await import('../server/admin/clone.js');
   const ask = { source_id: SRC, destination_id: DST, max_messages: 10 };
-  const recent = new Date().toISOString();
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   let tables = baseTables(3);
-  tables.tgcloner_clone_jobs.push({ id: 'live', source_id: SRC, destination_id: DST, mode: 'live_mirror', status: 'queued', updated_at: recent });
+  tables.tgcloner_clone_jobs.push({ id: 'live', source_id: SRC, destination_id: DST, mode: 'live_mirror', status: 'queued', created_at: old });
+  tables.tgcloner_clone_job_items.push({ id: 'li', job_id: 'live', status: 'queued' });
   global.fetch = fakeDb(tables).fetch;
   assert.equal((await post(handler, ask)).status, 200, 'a queued live_mirror job is not a full clone');
 
+  for (const open of ['queued', 'processing']) {
+    tables = baseTables(3);
+    tables.tgcloner_clone_jobs.push({ id: 'slow', source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'running', created_at: old, updated_at: old });
+    tables.tgcloner_clone_job_items.push({ id: 'si', job_id: 'slow', status: open });
+    global.fetch = fakeDb(tables).fetch;
+    const r = await post(handler, ask);
+    assert.equal(r.body.error, 'clone_job_already_active', `an old full clone with a ${open} item still blocks`);
+    assert.equal(r.body.job_id, 'slow');
+  }
+
+  // A job marked failed after one item failed still has queued items that the engine will post.
   tables = baseTables(3);
-  tables.tgcloner_clone_jobs.push({ id: 'stuck', source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'running', updated_at: old });
+  tables.tgcloner_clone_jobs.push({ id: 'half', source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'failed', created_at: old });
+  tables.tgcloner_clone_job_items.push({ id: 'h1', job_id: 'half', status: 'failed' }, { id: 'h2', job_id: 'half', status: 'queued' });
   global.fetch = fakeDb(tables).fetch;
-  assert.equal((await post(handler, ask)).status, 200, 'a full clone untouched for over an hour does not block forever');
+  assert.equal((await post(handler, ask)).body.error, 'clone_job_already_active', 'a failed job with a queued item still blocks');
+
+  // Many finished jobs do not hide a newer job that still has open work.
+  tables = baseTables(3);
+  for (let i = 0; i < 30; i++) {
+    tables.tgcloner_clone_jobs.push({ id: `old${i}`, source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'done', created_at: old });
+    tables.tgcloner_clone_job_items.push({ id: `oi${i}`, job_id: `old${i}`, status: 'done' });
+  }
+  tables.tgcloner_clone_jobs.push({ id: 'newest', source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'queued' });
+  tables.tgcloner_clone_job_items.push({ id: 'ni', job_id: 'newest', status: 'queued' });
+  global.fetch = fakeDb(tables).fetch;
+  assert.equal((await post(handler, ask)).body.job_id, 'newest');
+
+  tables = baseTables(3);
+  tables.tgcloner_clone_jobs.push({ id: 'other-src', source_id: 'other', destination_id: DST, mode: 'full_clone', status: 'queued', created_at: old });
+  tables.tgcloner_clone_job_items.push({ id: 'oi', job_id: 'other-src', status: 'queued' });
+  global.fetch = fakeDb(tables).fetch;
+  assert.equal((await post(handler, ask)).body.error, 'clone_job_already_active', 'a full clone from another source into the same destination blocks');
+
+  tables = baseTables(3);
+  tables.tgcloner_clone_jobs.push({ id: 'dead', source_id: SRC, destination_id: DST, mode: 'full_clone', status: 'queued', created_at: old });
+  tables.tgcloner_clone_job_items.push({ id: 'di', job_id: 'dead', status: 'done' });
+  global.fetch = fakeDb(tables).fetch;
+  assert.equal((await post(handler, ask)).status, 200, 'a job with no queued/processing item cannot post and does not block');
 
   tables = baseTables(3);
   tables.tgcloner_sources.push({ id: 'other', chat_id: '-1002', username: null });
@@ -241,6 +282,50 @@ test('clone guard: live mirror does not block, stale full clone does not block, 
   tables.tgcloner_message_mappings = [{ id: 'mm', source_id: 'other', destination_id: DST, source_message_id: 1, status: 'copied' }];
   global.fetch = fakeDb(tables).fetch;
   assert.equal((await post(handler, ask)).body.error, 'destination_has_other_source_posts');
+});
+
+test('clone snapshot: refuses when the source changes during the read; items are atomic and ordered', async (t) => {
+  withEnv(t);
+  const { default: handler } = await import('../server/admin/clone.js');
+  const ask = { source_id: SRC, destination_id: DST, max_messages: 500 };
+
+  // An Import adds a message between the first count and the read.
+  let tables = baseTables(5);
+  let db = fakeDb(tables);
+  global.fetch = async (url, init) => {
+    if (String(url).includes('tgcloner_source_messages') && (init?.method || 'GET') === 'GET' && !tables.tgcloner_source_messages.some(m => m.source_message_id === 99)) {
+      tables.tgcloner_source_messages.push({ id: 'm99', source_id: SRC, source_message_id: 99, media_group_id: null, has_internal_links: false, is_pinned: false });
+    }
+    return db.fetch(url, init);
+  };
+  let r = await post(handler, ask);
+  assert.equal(r.body.error, 'clone_source_changed');
+  assert.equal(tables.tgcloner_clone_jobs.length, 0, 'no job when the snapshot moved');
+
+  // Items: one insert, copies first in source order, then rewrites, then pins.
+  tables = baseTables(4);
+  tables.tgcloner_source_messages[1].has_internal_links = true;
+  tables.tgcloner_source_messages[2].is_pinned = true;
+  db = fakeDb(tables);
+  global.fetch = db.fetch;
+  r = await post(handler, ask);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.snapshot_max_source_message_id, 4);
+  assert.equal(db.calls.filter(c => c.method === 'POST' && c.table === 'tgcloner_clone_job_items').length, 1, 'one atomic insert');
+  const order = [...tables.tgcloner_clone_job_items].sort((a, b) => a.created_at.localeCompare(b.created_at)).map(i => `${i.phase}:${i.source_message_id}`);
+  assert.deepEqual(order, ['copy:1', 'copy:2', 'copy:3', 'copy:4', 'rewrite:2', 'pin:3']);
+
+  // Item insert fails: the job is marked failed, not left queued with no items.
+  tables = baseTables(3);
+  db = fakeDb(tables);
+  global.fetch = async (url, init) => {
+    if (String(url).includes('tgcloner_clone_job_items') && init?.method === 'POST') return new Response('{"message":"boom"}', { status: 500 });
+    return db.fetch(url, init);
+  };
+  r = await post(handler, ask);
+  assert.equal(r.status, 500);
+  assert.equal(r.body.error, 'clone_items_insert_failed');
+  assert.equal(tables.tgcloner_clone_jobs[0].status, 'failed');
 });
 
 test('verify reads every message and mapping past the cap', async (t) => {
@@ -262,5 +347,10 @@ test('verify reads every message and mapping past the cap', async (t) => {
 
 test('dashboard clone button sends the count the admin confirmed', () => {
   const page = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  assert.match(page, /max_messages:Math\.min\(Number\(source\.indexed_message_count\)\|\|0,500\)/);
+  assert.match(page, /max_messages:Math\.min\(cloneCount,CLONE_MAX\)/);
+  assert.match(page, /if\(cloneCount>CLONE_MAX\)\{alert\(/, 'a channel over the cap is refused in the page before any request');
+  assert.match(page, /CLONE_ERRORS\[e\.message\]/, 'server refusals are shown in Vietnamese');
+  const vm = page.match(/const CLONE_MAX=500;const CLONE_ERRORS=(\{[^;]*\});/);
+  assert.ok(vm, 'CLONE_ERRORS present');
+  for (const code of ['clone_exceeds_hard_limit','clone_exceeds_confirmed_count','clone_source_changed','clone_job_already_active','destination_is_source','clone_items_insert_failed']) assert.ok(vm[1].includes(code + ':'), code);
 });

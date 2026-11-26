@@ -1,6 +1,6 @@
 import { isAuthenticated } from '../../lib/auth.js';
 import { json, method, readJson } from '../../lib/http.js';
-import { count, insert, select, selectAll } from '../../lib/supabase.js';
+import { count, insert, patch, select, selectAll } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { isReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 
@@ -22,10 +22,6 @@ function buildCopyItems(jobId, messages) {
     }
   }
   return items;
-}
-
-async function insertBatches(rows) {
-  for (let i = 0; i < rows.length; i += 250) await insert(TABLES.cloneJobItems, rows.slice(i, i + 250), { returning: false });
 }
 
 export default async function handler(req, res) {
@@ -63,12 +59,13 @@ export default async function handler(req, res) {
     if (foreign) return json(res, 409, { ok: false, error: 'destination_has_other_source_posts' });
   }
 
-  // Only another full clone blocks; live-mirror jobs for the pair are normal. A full clone untouched for
-  // an hour is treated as stuck so the admin can start again (copy is idempotent through mappings).
+  // One full clone per destination (from any source) while it still has work. Decided by open items, not
+  // by job status: a job is marked "failed" as soon as one item fails, yet its other queued items are still
+  // claimed and posted (claimQueuedItems does not filter on job status). A job with no open item cannot post.
+  // Live-mirror jobs are not full clones and do not block.
   // shortcut: check-then-insert is not atomic; two simultaneous admin clicks can both pass. Needs a DB unique index (Phase 3).
-  const staleBefore = encodeURIComponent(new Date(Date.now() - 60 * 60 * 1000).toISOString());
-  const [active] = await select(TABLES.cloneJobs, `select=id,status&source_id=eq.${sourceId}&destination_id=eq.${destinationId}&mode=eq.full_clone&status=in.(queued,running,paused)&updated_at=gte.${staleBefore}&limit=1`);
-  if (active) return json(res, 409, { ok: false, error: 'clone_job_already_active', job_id: active.id, status: active.status });
+  const [openItem] = await select(TABLES.cloneJobItems, `select=job_id,job:${TABLES.cloneJobs}!inner(id,status,destination_id,mode)&job.destination_id=eq.${destinationId}&job.mode=eq.full_clone&status=in.(queued,processing)&limit=1`);
+  if (openItem) return json(res, 409, { ok: false, error: 'clone_job_already_active', job_id: openItem.job_id, status: openItem.job?.status || null });
 
   const total = await count(TABLES.sourceMessages, `source_id=eq.${sourceId}`);
   if (total === 0) return json(res, 409, { ok: false, error: 'clone_source_empty' });
@@ -79,28 +76,39 @@ export default async function handler(req, res) {
     return json(res, 409, { ok: false, error: 'clone_exceeds_confirmed_count', source_messages: total, max_messages: maxMessages });
   }
 
+  // Snapshot check: offset paging can repeat or skip a row if an Import adds or Reconcile removes messages
+  // mid-read, so require unique rows equal to the count both before and after the read.
   const messages = await selectAll(TABLES.sourceMessages, `select=source_message_id,media_group_id,has_internal_links,is_pinned&source_id=eq.${sourceId}&order=source_message_id.asc`);
-  if (messages.length !== total) {
-    return json(res, 409, { ok: false, error: 'clone_source_changed', source_messages: total, read_messages: messages.length });
+  const uniqueIds = new Set(messages.map((m) => Number(m.source_message_id))).size;
+  const totalAfter = await count(TABLES.sourceMessages, `source_id=eq.${sourceId}`);
+  if (messages.length !== total || uniqueIds !== total || totalAfter !== total) {
+    return json(res, 409, { ok: false, error: 'clone_source_changed', source_messages: total, read_messages: messages.length, unique_messages: uniqueIds, source_messages_after: totalAfter });
   }
   const [job] = await insert(TABLES.cloneJobs, { source_id: source.id, destination_id: destination.id, mode: 'full_clone', status: 'queued' });
 
   const copyItems = buildCopyItems(job.id, messages);
-  await insertBatches(copyItems);
-
   const rewriteItems = messages.filter((m) => m.has_internal_links).map((m) => ({
     job_id: job.id, source_message_id: m.source_message_id, source_message_ids: [Number(m.source_message_id)], phase: 'rewrite', status: 'queued'
   }));
-  await insertBatches(rewriteItems);
-
   const pinItems = messages.filter((m) => m.is_pinned).map((m) => ({
     job_id: job.id, source_message_id: m.source_message_id, source_message_ids: [Number(m.source_message_id)], phase: 'pin', status: 'queued'
   }));
-  await insertBatches(pinItems);
+  // One insert = one transaction: a job never gets only part of its items (a partial job would finish
+  // "done" with posts missing). Explicit created_at keeps the queue order: copies in source order, then
+  // rewrites, then pins (rows inserted together would otherwise share one now()).
+  const base = Date.now();
+  const items = [...copyItems, ...rewriteItems, ...pinItems].map((item, i) => ({ ...item, created_at: new Date(base + i).toISOString() }));
+  try {
+    await insert(TABLES.cloneJobItems, items, { returning: false });
+  } catch (error) {
+    await patch(TABLES.cloneJobs, `id=eq.${encodeURIComponent(job.id)}`, { status: 'failed', updated_at: new Date().toISOString() }, { returning: false }).catch(() => {});
+    return json(res, 500, { ok: false, error: 'clone_items_insert_failed', job_id: job.id });
+  }
 
   json(res, 200, {
     ok: true,
     job_id: job.id,
+    snapshot_max_source_message_id: Number(messages[messages.length - 1].source_message_id),
     source_messages: messages.length,
     copy_items: copyItems.length,
     rewrite_items: rewriteItems.length,
