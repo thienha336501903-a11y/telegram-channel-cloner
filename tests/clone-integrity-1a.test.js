@@ -3,73 +3,11 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import fs from 'node:fs';
 import { createSessionCookie } from '../lib/auth.js';
+import { CAP, fakeDb } from './helpers/fake-postgrest.js';
 
-// Fake PostgREST with the Production "Max rows" cap: a GET never returns more than CAP rows,
-// whatever limit the caller asks for. Supports the filters these handlers use.
-const CAP = 1000;
+// Shared fake PostgREST (cap 1000, embeds, created_at like the real default).
 const SRC = '11111111-1111-1111-1111-111111111111';
 const DST = '22222222-2222-2222-2222-222222222222';
-
-function fakeDb(tables) {
-  const calls = [];
-  let nextId = 1;
-  function filterRows(rows, params) {
-    let out = rows;
-    for (const [key, value] of params) {
-      if (['select', 'order', 'limit', 'offset'].includes(key)) continue;
-      const [op, ...rest] = value.split('.');
-      const arg = rest.join('.');
-      const get = key.startsWith('job.') ? (r => r.job?.[key.slice(4)]) : (r => r[key]);
-      if (op === 'eq') out = out.filter(r => String(get(r)) === arg);
-      else if (op === 'neq') out = out.filter(r => String(get(r)) !== arg);
-      else if (op === 'gte') out = out.filter(r => String(get(r)) >= arg);
-      else if (op === 'in') { const set = new Set(arg.replace(/^\(|\)$/g, '').split(',')); out = out.filter(r => set.has(String(get(r)))); }
-      else throw new Error(`fake db: unsupported filter ${key}=${value}`);
-    }
-    const order = params.get('order');
-    if (order) {
-      const keys = order.split(',').map(k => k.split('.')[0]);
-      out = [...out].sort((a, b) => { for (const k of keys) { if (a[k] < b[k]) return -1; if (a[k] > b[k]) return 1; } return 0; });
-    }
-    return out;
-  }
-  const fetch = async (url, init = {}) => {
-    const u = new URL(String(url));
-    const table = u.pathname.split('/rest/v1/')[1];
-    const method = init.method || 'GET';
-    calls.push({ method, table, query: u.search });
-    tables[table] ||= [];
-    if (method === 'HEAD') {
-      const n = filterRows(tables[table], u.searchParams).length;
-      return new Response(null, { status: 200, headers: { 'content-range': `*/${n}` } });
-    }
-    if (method === 'GET') {
-      let base = tables[table];
-      // Embedded !inner join used by the open-item guard: job:tgcloner_clone_jobs!inner(...)
-      if (String(u.searchParams.get('select') || '').includes('job:tgcloner_clone_jobs!inner')) {
-        base = base.map(r => ({ ...r, job: (tables.tgcloner_clone_jobs || []).find(j => j.id === r.job_id) })).filter(r => r.job);
-      }
-      const rows = filterRows(base, u.searchParams);
-      const offset = Number(u.searchParams.get('offset') || 0);
-      const limit = Math.min(Number(u.searchParams.get('limit') || CAP), CAP);
-      return new Response(JSON.stringify(rows.slice(offset, offset + limit)), { status: 200 });
-    }
-    if (method === 'POST') {
-      const body = JSON.parse(init.body);
-      const rows = (Array.isArray(body) ? body : [body]).map(r => ({ id: `row-${nextId++}`, updated_at: new Date().toISOString(), ...r }));
-      tables[table].push(...rows);
-      return new Response(JSON.stringify(rows), { status: 201 });
-    }
-    if (method === 'PATCH') {
-      const values = JSON.parse(init.body);
-      const rows = filterRows(tables[table], u.searchParams);
-      rows.forEach(r => Object.assign(r, values));
-      return new Response(JSON.stringify(rows), { status: 200 });
-    }
-    throw new Error(`fake db: unsupported ${method}`);
-  };
-  return { fetch, calls, tables };
-}
 
 function withEnv(t, extra = {}) {
   const names = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'SESSION_SECRET', 'READER_CHANNEL_ALLOWLIST'];
