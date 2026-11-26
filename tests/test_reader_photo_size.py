@@ -32,16 +32,17 @@ class LargestSizeTest(unittest.TestCase):
         cached = size("w", 2560, 1440)          # largest area but no byte count
         medium = size("x", 1280, 720, n=90000)
         small = size("m", 320, 180, n=9000)
-        self.assertIs(largest_size([small, cached, medium]), medium)
+        self.assertIs(largest_size([small, cached, medium], prefer_known_bytes=True), medium)
+        self.assertIs(largest_size([small, cached, medium]), cached, "thumbnails keep the largest-area choice")
 
     def test_progressive_sizes_count(self):
         progressive = size("y", 1280, 720, sizes=[1000, 50000])
-        self.assertIs(largest_size([size("w", 2560, 1440), progressive]), progressive)
+        self.assertIs(largest_size([size("w", 2560, 1440), progressive], prefer_known_bytes=True), progressive)
 
     def test_falls_back_when_no_size_has_bytes(self):
         a = size("w", 2560, 1440)
         b = size("x", 1280, 720)
-        self.assertIs(largest_size([b, a]), a)
+        self.assertIs(largest_size([b, a], prefer_known_bytes=True), a)
 
     def test_photo_descriptor_is_usable(self):
         photo = SimpleNamespace(sizes=[size("w", 2560, 1440), size("x", 1280, 720, n=90000)])
