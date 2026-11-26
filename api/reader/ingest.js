@@ -2,7 +2,7 @@ import { json, method, readJson } from '../../lib/http.js';
 import { authenticateReaderRequest } from '../../lib/reader-manager.js';
 import { hasUsableReaderMtprotoMedia } from '../../lib/reader-media.js';
 import { linksForNormalizedMessage } from '../../lib/source-message.js';
-import { recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
+import { logEvent, recordInternalLinks, upsertSourceMessage } from '../../lib/repository.js';
 import { patch, select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { telegram } from '../../lib/telegram.js';
@@ -60,16 +60,34 @@ async function hydrateHistoricalMedia(source, saved, message) {
   } finally {
     const tempMessageId = Number(forwarded?.message_id || 0);
     if (tempMessageId > 0) {
+      let deleteError = null;
       try {
         await telegram('deleteMessage', { chat_id: source.chat_id, message_id: tempMessageId });
       } catch (error) {
+        deleteError = error?.message || String(error);
         console.warn('[reader-ingest] temporary hydration message cleanup failed', {
           source_id: source.id,
           temp_message_id: tempMessageId,
-          error: error?.message || String(error)
+          error: deleteError
         });
       }
+      await recordSourceMutation(source, sourceMessageId, messageType, tempMessageId, deleteError);
     }
+  }
+}
+
+// Every temporary post the bot made in a source channel leaves a durable trace (Vercel logs expire), so a
+// left-over post can be found and removed. Never fails the ingest.
+async function recordSourceMutation(source, sourceMessageId, messageType, tempMessageId, deleteError) {
+  try {
+    await logEvent({
+      source_id: source.id,
+      source_message_id: sourceMessageId,
+      event_type: deleteError ? 'reader_source_temp_post_left' : 'reader_source_temp_post_removed',
+      payload: { temp_message_id: tempMessageId, message_type: messageType, ...(deleteError ? { delete_error: String(deleteError).slice(0, 200) } : {}) }
+    });
+  } catch (error) {
+    console.warn('[reader-ingest] source mutation event not recorded', { source_id: source.id, temp_message_id: tempMessageId, error: error?.message || String(error) });
   }
 }
 
