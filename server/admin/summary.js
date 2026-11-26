@@ -16,7 +16,9 @@ export default async function handler(req, res) {
     select(TABLES.cloneJobs, 'select=*&order=created_at.desc&limit=50'),
     select(TABLES.readerJobs, 'select=*&order=created_at.desc&limit=50'),
     // shortcut: per-source post counts still read one narrow row per post; a GROUP BY RPC (migration) replaces this past ~50k posts.
-    selectAll(TABLES.sourceMessages, 'select=source_id,has_internal_links&order=id.asc', { maxRows: 500_000 }),
+    // A failed paged read falls back to the capped list and flags the counts as partial instead of failing the dashboard.
+    selectAll(TABLES.sourceMessages, 'select=source_id,has_internal_links&order=id.asc', { maxRows: 500_000 })
+      .catch(() => select(TABLES.sourceMessages, 'select=source_id,has_internal_links&limit=1000').then(rows => Object.assign(rows || [], { partial: true }))),
     count(TABLES.messageMappings),
     select(TABLES.cloneJobItems, 'select=id,last_error,status&status=in.(failed,queued)&last_error=not.is.null&limit=50'),
     // Never select token_hash: the dashboard only needs who is connected and when.
@@ -70,7 +72,8 @@ export default async function handler(req, res) {
       active_destinations: destinations.filter((x) => x.active).length,
       source_messages: messages.length,
       internal_link_messages: messages.filter((x) => x.has_internal_links).length,
-      mappings
+      mappings,
+      source_messages_partial: Boolean(messages?.partial)
     },
     sources: sourceRows,
     destinations,

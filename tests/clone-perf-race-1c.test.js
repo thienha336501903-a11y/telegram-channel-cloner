@@ -75,16 +75,20 @@ test('engine: items of a paused job are not claimed; stuck processing items are 
     tgcloner_clone_job_items: [
       { id: 'a', job_id: 'J1', status: 'queued', created_at: '1', attempts: 0 },
       { id: 'b', job_id: 'J2', status: 'queued', created_at: '2', attempts: 0 },
-      { id: 'c', job_id: 'J1', status: 'processing', started_at: iso(11 * 60 * 1000) },
-      { id: 'd', job_id: 'J1', status: 'processing', started_at: iso(60 * 1000) }
+      { id: 'c', job_id: 'J1', phase: 'copy', status: 'processing', attempts: 1, started_at: iso(11 * 60 * 1000) },
+      { id: 'd', job_id: 'J1', phase: 'copy', status: 'processing', attempts: 1, started_at: iso(60 * 1000) },
+      { id: 'e', job_id: 'J1', phase: 'rewrite', status: 'processing', attempts: 1, started_at: iso(11 * 60 * 1000) },
+      { id: 'f', job_id: 'J1', phase: 'pin', status: 'processing', attempts: 5, started_at: iso(11 * 60 * 1000) }
     ]
   };
   global.fetch = fakeDb(tables).fetch;
   const claimed = await claimQueuedItems(10);
   assert.deepEqual(claimed.map(i => i.id), ['a'], 'paused job item skipped');
-  assert.equal(await recoverStuckItems(), 1);
+  assert.deepEqual(await recoverStuckItems(), { requeued: 1, failed: 2 });
   const byId = Object.fromEntries(tables.tgcloner_clone_job_items.map(i => [i.id, i.status]));
-  assert.equal(byId.c, 'queued', 'stuck > 10 min requeued');
+  assert.equal(byId.c, 'failed', 'a stuck copy may have posted already: failed for a manual check, never re-posted');
+  assert.equal(byId.e, 'queued', 'a stuck rewrite only edits, so it is requeued');
+  assert.equal(byId.f, 'failed', 'requeue stops after 5 attempts');
   assert.equal(byId.d, 'processing', 'a recent item is left alone');
 });
 
@@ -111,6 +115,19 @@ test('summary counts posts, sources and mappings past the cap', async (t) => {
   assert.equal(r.body.counts.source_messages, 1500);
   assert.equal(r.body.counts.mappings, 1300);
   assert.equal(r.body.sources.find(s => s.id === SRC).indexed_message_count, 1500);
+  assert.equal(r.body.counts.source_messages_partial, false);
+});
+
+test('summary still loads with partial counts when the paged read fails', async (t) => {
+  withSupabaseEnv(t);
+  const tables = baseTables(5);
+  const db = fakeDb(tables);
+  global.fetch = async (url, init) => (String(url).includes('tgcloner_source_messages') && /offset=/.test(String(url))) ? new Response('{}', { status: 503 }) : db.fetch(url, init);
+  const { default: handler } = await import('../server/admin/summary.js');
+  const r = await call(handler);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.counts.source_messages_partial, true);
+  assert.equal(r.body.counts.source_messages, 5);
 });
 
 test('source-detail computes stats from every post past the cap', async (t) => {
