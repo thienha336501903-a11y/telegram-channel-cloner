@@ -64,7 +64,7 @@ def size_bytes(item):
     return max(progressive) if progressive else 0
 
 
-def largest_size(items):
+def largest_size(items, prefer_known_bytes=False):
     candidates = []
     for item in items or []:
         item_type = str(getattr(item, "type", "") or "")
@@ -76,8 +76,12 @@ def largest_size(items):
         candidates.append((width * height, byte_size, item))
     if not candidates:
         return None
-    candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-    return candidates[0][2]
+    # Photos only: prefer a size with a known byte count. A zero file_size photo descriptor is rejected by the
+    # server and, with source mutation allowed, makes it forward the post into the source channel to hydrate it.
+    # Document/video thumbnails keep the old choice (largest area) because they do not gate hydration.
+    sized = ([entry for entry in candidates if entry[1] > 0] if prefer_known_bytes else []) or candidates
+    sized.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return sized[0][2]
 
 
 def document_file_name(document, message_type):
@@ -120,7 +124,7 @@ def reader_raw_message(message, message_type):
 
     if message_type == "photo":
         photo = getattr(media, "photo", None) or getattr(message, "photo", None)
-        chosen = largest_size(getattr(photo, "sizes", None) or [])
+        chosen = largest_size(getattr(photo, "sizes", None) or [], prefer_known_bytes=True)
         descriptor = mtproto_size_metadata(chosen)
         if descriptor:
             raw_message["photo"] = [descriptor]
