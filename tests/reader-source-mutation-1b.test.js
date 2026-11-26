@@ -29,7 +29,7 @@ function fake({ deleteFails = false, eventFails = false } = {}) {
   const telegramCalls = [];
   const fetch = async (url, init = {}) => {
     const u = String(url);
-    if (u.includes('api.telegram.org')) {
+    if (new URL(u).hostname === 'api.telegram.org') {
       const method = u.split('/').pop();
       telegramCalls.push(method);
       if (method === 'forwardMessage') return Response.json({ ok: true, result: { message_id: 777, chat: { id: -1001 }, photo: [{ file_id: 'x', file_size: 10 }] } });
