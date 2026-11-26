@@ -46,7 +46,10 @@ test('P1 summary returns agents without token_hash and reader warnings', async (
   });
   const now = Date.now();
   const urls = [];
-  global.fetch = async (url) => {
+  global.fetch = async (url, init) => {
+    // Paged reads: later pages are empty; exact counts come from HEAD + content-range.
+    if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-range': '*/0' } });
+    if (/[?&]offset=[1-9]/.test(String(url))) return new Response('[]', { status: 200 });
     const u = String(url); urls.push(u);
     const table = u.split('/rest/v1/')[1].split('?')[0];
     const rows = {
@@ -85,7 +88,10 @@ test('P1 summary survives an unreadable agents table and ignores superseded impo
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
   });
-  global.fetch = async (url) => {
+  global.fetch = async (url, init) => {
+    // Paged reads: later pages are empty; exact counts come from HEAD + content-range.
+    if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-range': '*/0' } });
+    if (/[?&]offset=[1-9]/.test(String(url))) return new Response('[]', { status: 200 });
     const table = String(url).split('/rest/v1/')[1].split('?')[0];
     if (table === 'tgcloner_reader_agents') return new Response(JSON.stringify({ message: 'relation does not exist' }), { status: 404 });
     const rows = {
