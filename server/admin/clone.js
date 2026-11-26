@@ -24,6 +24,22 @@ function buildCopyItems(jobId, messages) {
   return items;
 }
 
+const CREATING_MS = 5 * 60 * 1000;
+
+async function earlierCloneInProgress(job, destinationId) {
+  const others = await select(TABLES.cloneJobs, `select=id,status,created_at&destination_id=eq.${destinationId}&mode=eq.full_clone&id=neq.${encodeURIComponent(job.id)}&created_at=lte.${encodeURIComponent(job.created_at)}&order=created_at.desc&limit=20`);
+  for (const other of others || []) {
+    const earlier = other.created_at < job.created_at || (other.created_at === job.created_at && String(other.id) < String(job.id));
+    if (!earlier) continue;
+    const open = await count(TABLES.cloneJobItems, `job_id=eq.${encodeURIComponent(other.id)}&status=in.(queued,processing)`);
+    if (open > 0) return true;
+    const any = await count(TABLES.cloneJobItems, `job_id=eq.${encodeURIComponent(other.id)}`);
+    // Still being created = queued, no items yet, and recent. A withdrawn or failed-insert job is 'failed' and never blocks.
+    if (any === 0 && other.status === 'queued' && Date.parse(job.created_at) - Date.parse(other.created_at) < CREATING_MS) return true;
+  }
+  return false;
+}
+
 export default async function handler(req, res) {
   if (!isAuthenticated(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
   if (!method(req, res, ['POST'])) return;
@@ -85,6 +101,15 @@ export default async function handler(req, res) {
     return json(res, 409, { ok: false, error: 'clone_source_changed', source_messages: total, read_messages: messages.length, unique_messages: uniqueIds, source_messages_after: totalAfter });
   }
   const [job] = await insert(TABLES.cloneJobs, { source_id: source.id, destination_id: destination.id, mode: 'full_clone', status: 'queued' });
+
+  // Close the check-then-insert race without a migration: two requests that both passed the open-item check
+  // now both have a job row (still without items). Each looks for an earlier full clone into this destination
+  // that is still open or still being created; the later job (created_at, then id) withdraws before any item
+  // exists, so at most one of them ever gets items. A job with no items older than CREATING_MS is dead.
+  if (await earlierCloneInProgress(job, destinationId)) {
+    await patch(TABLES.cloneJobs, `id=eq.${encodeURIComponent(job.id)}`, { status: 'failed', updated_at: new Date().toISOString() }, { returning: false }).catch(() => {});
+    return json(res, 409, { ok: false, error: 'clone_job_already_active', concurrent: true });
+  }
 
   const copyItems = buildCopyItems(job.id, messages);
   const rewriteItems = messages.filter((m) => m.has_internal_links).map((m) => ({

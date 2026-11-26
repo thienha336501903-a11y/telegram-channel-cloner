@@ -2,12 +2,12 @@
 // allowlist state. No write, no Telegram call.
 import { isAuthenticated } from '../../lib/auth.js';
 import { json, method } from '../../lib/http.js';
-import { count, select } from '../../lib/supabase.js';
+import { count, select, selectAll } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { isReaderChannelAllowed, readerChannelAllowlist } from '../../lib/channel-allowlist.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_MESSAGES = 5000; // shortcut: stats are computed from at most 5000 rows; raise or move to an RPC if a channel grows past it
+const MAX_MESSAGES = 20000; // shortcut: stats are computed in Node from every row (paged); move to an RPC past ~20k posts per channel
 
 export default async function handler(req, res) {
   if (!isAuthenticated(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -17,8 +17,9 @@ export default async function handler(req, res) {
 
   const [sources, messages, total, jobs] = await Promise.all([
     select(TABLES.sources, `select=id,chat_id,title,username,active,created_at,indexed_at,last_reconciled_at&id=eq.${id}&limit=1`),
-    // Newest first: if PostgREST max_rows (or MAX_MESSAGES) cuts the list, the stats cover the newest posts and say so.
-    select(TABLES.sourceMessages, `select=message_type,has_internal_links,is_pinned,media_group_id,source_date&source_id=eq.${id}&order=source_date.desc.nullslast&limit=${MAX_MESSAGES}`),
+    // Paged read of every post (PostgREST caps one select at Max rows = 1000); a channel past MAX_MESSAGES falls back to the newest 1000 and says so.
+    selectAll(TABLES.sourceMessages, `select=message_type,has_internal_links,is_pinned,media_group_id,source_date&source_id=eq.${id}&order=source_message_id.asc`, { maxRows: MAX_MESSAGES })
+      .catch(() => select(TABLES.sourceMessages, `select=message_type,has_internal_links,is_pinned,media_group_id,source_date&source_id=eq.${id}&order=source_date.desc.nullslast&limit=1000`)),
     count(TABLES.sourceMessages, `source_id=eq.${id}`).catch(() => null),
     select(TABLES.readerJobs, `select=id,job_type,status,attempts,message_count,deleted_count,error_code,last_error,progress_stage,requested_at,claimed_at,completed_at,created_at&source_id=eq.${id}&order=created_at.desc&limit=20`)
   ]);
