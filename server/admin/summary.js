@@ -3,6 +3,7 @@ import { json } from '../../lib/http.js';
 import { select } from '../../lib/supabase.js';
 import { TABLES } from '../../lib/tables.js';
 import { ONLINE_WINDOW_MS } from '../../lib/reader-manager.js';
+import { isReaderChannelAllowed } from '../../lib/channel-allowlist.js';
 
 const STALE_QUEUED_MS = 10 * 60 * 1000;
 
@@ -34,7 +35,8 @@ export default async function handler(req, res) {
   const sourceRows = (sources || []).map(source => ({
     ...source,
     indexed_message_count: liveCounts.get(source.id) || 0,
-    reader_job: latestReaderJobBySource.get(source.id) || null
+    reader_job: latestReaderJobBySource.get(source.id) || null,
+    allowlisted: isReaderChannelAllowed(source)
   }));
 
   const now = Date.now();

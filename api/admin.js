@@ -6,6 +6,7 @@ import readerManagerHandler from '../server/admin/reader-manager.js';
 import publicConfigHandler from '../server/admin/public-config.js';
 import runTickHandler from '../server/admin/run-tick.js';
 import sourceHandler from '../server/admin/source.js';
+import sourceDetailHandler from '../server/admin/source-detail.js';
 import summaryHandler from '../server/admin/summary.js';
 import v4SourceHandler from '../server/admin/v4-source.js';
 import verifyHandler from '../server/admin/verify.js';
@@ -21,6 +22,7 @@ const handlers = {
   'public-config': publicConfigHandler,
   'run-tick': runTickHandler,
   source: sourceHandler,
+  'source-detail': sourceDetailHandler,
   summary: summaryHandler,
   'v4-source': v4SourceHandler,
   verify: verifyHandler,
