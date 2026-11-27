@@ -105,7 +105,7 @@ export default async function handler(req, res) {
   // Fail closed: the bot never posts into a source channel unless explicitly allowed.
   const sourceMutationAllowed = !noSourceMutation
     && String(process.env.TGCLONER_READER_ALLOW_SOURCE_MUTATION || '').toLowerCase() === 'true';
-  let hydrationSkipped = 0;
+  const hydrationSkipped = [];
   let savedCount = 0;
   let linkCount = 0;
   let hydrationAttempts = 0;
@@ -166,7 +166,7 @@ export default async function handler(req, res) {
     if (hasUsableReaderMtprotoMedia(m)) {
       mtprotoPreserved += 1;
     } else if (skipHydration) {
-      hydrationSkipped += 1;
+      hydrationSkipped.push(Number(m.source_message_id));
     } else if (m.raw_message?.from_reader && sourceMutationAllowed) {
       const hydration = await hydrateHistoricalMedia(source, saved, m);
       if (hydration.attempted) hydrationAttempts += 1;
@@ -183,7 +183,8 @@ export default async function handler(req, res) {
     internal_links: linkCount,
     hydration_attempts: hydrationAttempts,
     hydrated: hydratedCount,
-    hydration_skipped_no_source_mutation: hydrationSkipped,
+    hydration_skipped_no_source_mutation: hydrationSkipped.length,
+    hydration_skipped_source_message_ids: hydrationSkipped,
     mtproto_preserved: mtprotoPreserved,
     hydration_errors: hydrationErrors
   });

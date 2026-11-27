@@ -46,7 +46,10 @@ function fake({ existingRaw = null, sourceChatIds = [], chat = null } = {}) {
       if (chatFilter) return Response.json(sourceChatIds.includes(chatFilter.replace('eq.', '')) ? [{ id: 'other' }] : []);
       return Response.json([{ id: SRC, chat_id: '-1001', username: null }]);
     }
-    if (table === 'tgcloner_source_messages' && method === 'GET') return Response.json(existingRaw ? [{ raw_message: existingRaw }] : []);
+    if (table === 'tgcloner_source_messages' && method === 'GET') {
+      const exact = u.searchParams.get('source_id') === `eq.${SRC}` && u.searchParams.get('source_message_id') === 'eq.5';
+      return Response.json(existingRaw && exact ? [{ raw_message: existingRaw }] : []);
+    }
     if (table === 'tgcloner_source_messages' && method === 'POST') {
       savedRaw.push(JSON.parse(init.body).raw_message);
       return Response.json([{ id: 'row-1' }], { status: 201 });
@@ -87,6 +90,39 @@ test('default: no Telegram call, whole batch saved, media counted as skipped', a
   assert.equal(r.body.saved, 2);
   assert.equal(r.body.hydration_attempts, 0);
   assert.equal(r.body.hydration_skipped_no_source_mutation, 1);
+  assert.deepEqual(r.body.hydration_skipped_source_message_ids, [5]);
+});
+
+test('default: an earlier non-hydrated row is overwritten as before', async (t) => {
+  withEnv(t);
+  const db = fake({ existingRaw: { from_reader: true, photo: { mtproto: true, file_size: 0 } } });
+  const { default: handler } = await import('../api/reader/ingest.js');
+  const r = await post(handler, batch, ingestHeaders());
+  assert.equal(r.status, 200);
+  assert.deepEqual(db.savedRaw[0], { from_reader: true });
+});
+
+test('clone engine never writes into a destination that is a registered source channel', async (t) => {
+  withEnv(t);
+  const finished = [];
+  const telegramCalls = [];
+  global.fetch = async (url, init = {}) => {
+    const u = new URL(String(url));
+    const method = init.method || 'GET';
+    if (u.hostname === 'api.telegram.org') { telegramCalls.push(u.pathname); return Response.json({ ok: true, result: { message_id: 1 } }); }
+    const table = u.pathname.split('/rest/v1/')[1];
+    if (table === 'tgcloner_sources') return Response.json([{ id: SRC, chat_id: '-1001' }]);
+    if (table === 'tgcloner_destinations') return Response.json([{ id: 'd1', chat_id: '-1002' }]);
+    if (table === 'tgcloner_clone_job_items' && method === 'PATCH') { finished.push(JSON.parse(init.body)); return Response.json([]); }
+    if (method === 'GET' || method === 'HEAD') return Response.json([], { headers: { 'content-range': '*/0' } });
+    return new Response(method === 'PATCH' ? '[]' : null, { status: method === 'POST' ? 201 : 200 });
+  };
+  const { processItem } = await import('../lib/engine.js');
+  const r = await processItem({ id: 'i1', phase: 'copy', source_message_id: 5, attempts: 0, job: { id: 'j1', source_id: SRC, destination_id: 'd1' } });
+  assert.equal(r.ok, false);
+  assert.deepEqual(telegramCalls, []);
+  assert.equal(finished[0].status, 'failed');
+  assert.equal(finished[0].last_error, 'destination_is_source');
 });
 
 test('default: an earlier hydrated copy is kept, not overwritten', async (t) => {
