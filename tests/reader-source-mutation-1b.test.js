@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 const SRC = '11111111-1111-1111-1111-111111111111';
 
 function withEnv(t, extra = {}) {
-  const names = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN', 'READER_INGEST_SECRET', 'READER_CHANNEL_ALLOWLIST', 'TGCLONER_READER_NO_SOURCE_MUTATION'];
+  const names = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN', 'READER_INGEST_SECRET', 'READER_CHANNEL_ALLOWLIST', 'TGCLONER_READER_NO_SOURCE_MUTATION', 'TGCLONER_READER_ALLOW_SOURCE_MUTATION'];
   const old = Object.fromEntries(names.map(n => [n, process.env[n]]));
   const oldFetch = global.fetch;
   process.env.SUPABASE_URL = 'https://example.supabase.co';
@@ -17,6 +17,7 @@ function withEnv(t, extra = {}) {
   delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   delete process.env.READER_CHANNEL_ALLOWLIST;
   delete process.env.TGCLONER_READER_NO_SOURCE_MUTATION;
+  delete process.env.TGCLONER_READER_ALLOW_SOURCE_MUTATION;
   Object.assign(process.env, extra);
   t.after(() => {
     global.fetch = oldFetch;
@@ -64,7 +65,7 @@ function postIngest(handler, body) {
 const photoWithoutDescriptor = { source_id: SRC, messages: [{ source_message_id: 5, message_type: 'photo', raw_message: { from_reader: true } }] };
 
 test('hydration records a removed temporary post', async (t) => {
-  withEnv(t);
+  withEnv(t, { TGCLONER_READER_ALLOW_SOURCE_MUTATION: 'true' });
   const db = fake();
   global.fetch = db.fetch;
   const { default: handler } = await import('../api/reader/ingest.js');
@@ -78,7 +79,7 @@ test('hydration records a removed temporary post', async (t) => {
 });
 
 test('a failed clean-up records a left-over post', async (t) => {
-  withEnv(t);
+  withEnv(t, { TGCLONER_READER_ALLOW_SOURCE_MUTATION: 'true' });
   const db = fake({ deleteFails: true });
   global.fetch = db.fetch;
   const { default: handler } = await import('../api/reader/ingest.js');
@@ -89,7 +90,7 @@ test('a failed clean-up records a left-over post', async (t) => {
 });
 
 test('event recording failure does not fail the ingest', async (t) => {
-  withEnv(t);
+  withEnv(t, { TGCLONER_READER_ALLOW_SOURCE_MUTATION: 'true' });
   const db = fake({ eventFails: true });
   global.fetch = db.fetch;
   const { default: handler } = await import('../api/reader/ingest.js');
