@@ -22,12 +22,12 @@ test('Reader MTProto photos bypass hydration when a usable size exists', () => {
   }), true);
 });
 
-test('missing or invalid descriptors retain the legacy hydration fallback', () => {
+test('missing or invalid descriptors use the legacy hydration fallback only when source mutation is allowed', () => {
   assert.equal(hasUsableReaderMtprotoMedia({
     message_type: 'video',
     raw_message: { from_reader: true, video: { mtproto: true, file_size: 0, file_id: '' } }
   }), false);
-  assert.match(ingest, /else if \(m\.raw_message\?\.from_reader\)/);
+  assert.match(ingest, /else if \(m\.raw_message\?\.from_reader && sourceMutationAllowed\)/);
 });
 
 test('local Reader uses bounded batches as a second timeout guard', () => {

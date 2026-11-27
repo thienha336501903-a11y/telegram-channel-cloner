@@ -2,6 +2,8 @@ import { isAuthenticated } from '../../lib/auth.js';
 import { json, method, readJson } from '../../lib/http.js';
 import { getChat } from '../../lib/telegram.js';
 import { getActiveSource, upsertDestination } from '../../lib/repository.js';
+import { select } from '../../lib/supabase.js';
+import { TABLES } from '../../lib/tables.js';
 
 export default async function handler(req, res) {
   if (!isAuthenticated(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -13,6 +15,9 @@ export default async function handler(req, res) {
   const chat = await getChat(body.chat_id);
   if (chat.type !== 'channel') return json(res, 400, { ok: false, error: 'destination_must_be_channel' });
   if (String(chat.id) === String(source.chat_id)) return json(res, 400, { ok: false, error: 'destination_cannot_equal_source' });
+  // Any registered source channel (allowlisted or not) must never become a write target.
+  const sourceRows = await select(TABLES.sources, `select=id&chat_id=eq.${encodeURIComponent(String(chat.id))}&limit=1`);
+  if (sourceRows?.length) return json(res, 400, { ok: false, error: 'destination_cannot_equal_source' });
   const rows = await upsertDestination({
     source_id: source.id,
     chat_id: String(chat.id),
