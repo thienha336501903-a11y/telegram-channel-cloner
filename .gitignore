@@ -33,3 +33,5 @@ reader-manager/dist/
 reader-manager/bin/
 reader-manager/Output/
 YeuNauAnReaderMirror.spec
+
+scripts/staging/fixture.json

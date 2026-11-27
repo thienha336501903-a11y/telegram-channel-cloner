@@ -1,0 +1,15 @@
+{
+  "_note": "Copy to fixture.json (not committed). ids = real message ids in the staging source channel (from post links t.me/c/3925106279/<id>). Text posts with links must match the real text exactly (the Clone rewrite step edits the destination copy with this text). Media posts: no caption or a caption without links.",
+  "source_id": "<uuid of SYSTEMB STAGING TEST in tgcloner_sources>",
+  "messages": [
+    { "id": 4, "type": "text", "text": "Bài 1: giới thiệu" },
+    { "id": 5, "type": "photo" },
+    { "id": 6, "type": "video", "mime_type": "video/mp4" },
+    { "id": 7, "type": "photo", "album": "a1" },
+    { "id": 8, "type": "photo", "album": "a1" },
+    { "id": 9, "type": "photo", "album": "a1" },
+    { "id": 10, "type": "text", "text": "Xem lại bài 1: https://t.me/c/3925106279/4", "pinned": true },
+    { "id": 11, "type": "voice" },
+    { "id": 12, "type": "photo", "no_descriptor": true }
+  ]
+}
