@@ -1,3 +1,4 @@
+import botCheckHandler from '../server/admin/bot-check.js';
 import cloneHandler from '../server/admin/clone.js';
 import destinationsHandler from '../server/admin/destinations.js';
 import distributorProgressHandler from '../server/admin/distributor-progress.js';
@@ -14,6 +15,7 @@ import webhookHandler from '../server/admin/webhook.js';
 import { json } from '../lib/http.js';
 
 const handlers = {
+  'bot-check': botCheckHandler,
   clone: cloneHandler,
   destinations: destinationsHandler,
   'distributor-progress': distributorProgressHandler,
